@@ -2,7 +2,7 @@
 
 Google Apps Script + Cloud Function pipeline that fills and sends Michigan
 DC 100a (Demand for Possession — Nonpayment of Rent) forms for Green
-Property Mgt.
+Property Management.
 
 ## Pieces
 
@@ -42,3 +42,12 @@ Run `installTrigger()` once to enable the scheduled runs. Deploy → New
 deployment → Web app (execute as: me, access: anyone within domain) to
 enable the on-demand portal; update `PM_LIST` in `Code.js` if the roster
 of initiating PMs changes.
+
+## Post-launch inbox check
+
+Run `installHealthCheckTriggers_()` once from the editor to verify, for
+the next 3 days, that each property's AppFolio emails actually arrive and
+parse correctly — no new infra, it reuses this script's own Gmail access
+and emails a pass/fail summary to `ADMIN_EMAIL` each day, then self-deletes.
+Run `checkInboxHealth_()` directly any time to check right now instead of
+waiting for the next scheduled check.

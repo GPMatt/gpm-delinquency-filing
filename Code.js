@@ -715,6 +715,58 @@ function webGetPmList() {
   return PM_LIST;
 }
 
+// CacheService rejects any single value over 100KB ("Argument too large:
+// value") — the full tenant directory across all 6 properties blows past
+// that easily. These helpers transparently chunk a JSON payload across
+// multiple cache keys so the caller doesn't have to think about the limit.
+var CACHE_CHUNK_SIZE = 90000;
+
+function cachePutJSON_(token, obj) {
+  var str   = JSON.stringify(obj);
+  var cache = CacheService.getScriptCache();
+  var chunkCount = Math.max(1, Math.ceil(str.length / CACHE_CHUNK_SIZE));
+  for (var i = 0; i < chunkCount; i++) {
+    cache.put(token + '_' + i, str.slice(i * CACHE_CHUNK_SIZE, (i + 1) * CACHE_CHUNK_SIZE), 1800);
+  }
+  cache.put(token + '_meta', String(chunkCount), 1800);
+}
+
+function cacheGetJSON_(token) {
+  var cache    = CacheService.getScriptCache();
+  var countStr = cache.get(token + '_meta');
+  if (!countStr) return null;
+  var count = parseInt(countStr, 10);
+  var str   = '';
+  for (var i = 0; i < count; i++) {
+    var part = cache.get(token + '_' + i);
+    if (part === null) return null; // one chunk expired — treat whole thing as gone
+    str += part;
+  }
+  return JSON.parse(str);
+}
+
+function cacheRemoveJSON_(token) {
+  var cache    = CacheService.getScriptCache();
+  var countStr = cache.get(token + '_meta');
+  var count    = countStr ? parseInt(countStr, 10) : 0;
+  var keys     = [token + '_meta'];
+  for (var i = 0; i < count; i++) keys.push(token + '_' + i);
+  cache.removeAll(keys);
+}
+
+// Shrinks the tenant directory to just the units that actually have a
+// delinquent row — the only entries buildFormData_ will ever look up —
+// instead of caching every tenant company-wide.
+function filterRelevantDirectory_(directory, resolvedRows) {
+  var wanted = {};
+  resolvedRows.forEach(function(row) {
+    wanted[normalizeAddrKey_(row.rawAddr) + '|' + row.rawUnit.toLowerCase().trim()] = true;
+  });
+  return directory.filter(function(entry) {
+    return wanted[normalizeAddrKey_(entry.property) + '|' + entry.unit.toLowerCase().trim()];
+  });
+}
+
 // Fetches the latest report, resolves + filters it, and returns a preview
 // for the PM to confirm. Nothing is filed yet. Resolved rows are cached
 // under a token so "Let's File" re-uses exactly what was previewed instead
@@ -734,16 +786,17 @@ function webPreview(thresholdRaw, initiator) {
 
   var directory   = attachments.directoryText ? parseTenantDirectory_(attachments.directoryText) : [];
   var delinquents = parseDelinquencyCSV_(attachments.delinquencyText, sheet2Map, false, threshold);
+  var relevantDir = filterRelevantDirectory_(directory, delinquents.resolved);
 
   var token = Utilities.getUuid();
-  CacheService.getScriptCache().put(token, JSON.stringify({
+  cachePutJSON_(token, {
     threshold:     threshold,
     initiator:     initiator,
-    directory:     directory,
+    directory:     relevantDir,
     resolved:      delinquents.resolved,
     flagged:       delinquents.flagged,
     missingLabels: attachments.missingLabels,
-  }), 1800); // 30 min — long enough to review, short enough to force a refetch if stale
+  }); // 30 min TTL — long enough to review, short enough to force a refetch if stale
 
   return {
     token:         token,
@@ -762,11 +815,9 @@ function webPreview(thresholdRaw, initiator) {
 
 // Files exactly what webPreview showed the PM, using the cached token.
 function webConfirmFiling(token) {
-  var cache = CacheService.getScriptCache();
-  var raw   = cache.get(token);
-  if (!raw) throw new Error('This preview has expired. Please refresh and try again.');
-  cache.remove(token);
-  var data = JSON.parse(raw);
+  var data = cacheGetJSON_(token);
+  if (!data) throw new Error('This preview has expired. Please refresh and try again.');
+  cacheRemoveJSON_(token);
 
   var today   = new Date();
   var pmBlobs = {};
@@ -811,6 +862,83 @@ function installTrigger() {
   ScriptApp.newTrigger('runStandardFiling')
     .timeBased().onMonthDay(6).atHour(9).inTimezone('America/Detroit').create();
   Logger.log('Triggers installed: runVictoryFiling on 4th, runStandardFiling on 6th — 9 AM Eastern.');
+}
+
+
+// ============================================================
+// LAUNCH HEALTH CHECK — one-time, self-deleting, 3 days only
+// Run installHealthCheckTriggers_() ONCE from the editor (Run menu) to
+// verify the on-demand pipeline: did today's AppFolio emails arrive, and
+// did they parse into the expected columns? No infra beyond this script
+// is needed — it reuses the same Gmail access and ADMIN_EMAIL already
+// configured for filing. Each trigger is one-time (.at(date)) so it fires
+// once and Apps Script removes it automatically — nothing to clean up
+// after day 3, and no calendar-style upkeep in the meantime.
+// ============================================================
+function installHealthCheckTriggers_() {
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === 'checkInboxHealth_') ScriptApp.deleteTrigger(t);
+  });
+  for (var i = 1; i <= 3; i++) {
+    var d = new Date();
+    d.setDate(d.getDate() + i);
+    d.setHours(10, 0, 0, 0); // 10 AM script timezone (America/Detroit) — after AppFolio's morning send
+    ScriptApp.newTrigger('checkInboxHealth_').timeBased().at(d).create();
+  }
+  Logger.log('Installed 3 one-time checkInboxHealth_ triggers, 10 AM ET each of the next 3 days. Each self-deletes after firing.');
+}
+
+// Checks every property label for today's Delinquency + Tenants email,
+// and sanity-checks the CSV shape (right number of columns) without
+// filing anything. Emails a pass/fail summary to ADMIN_EMAIL. Safe to
+// run manually any time — this is also the function the 3-day triggers
+// call, and what to run by hand tomorrow to check today's emails now.
+function checkInboxHealth_() {
+  var sender  = cfg_('APPFOLIO_EMAIL_SENDER') || 'appfolio.com';
+  var today   = new Date();
+  var dateStr = Utilities.formatDate(today, Session.getScriptTimeZone(), 'MMMM d, yyyy');
+  var lines   = [];
+  var allOk   = true;
+
+  ALL_LABELS.forEach(function(label) {
+    var dQuery = 'from:(' + sender + ') subject:"' + label + ' Delinquency"';
+    var tQuery = 'from:(' + sender + ') subject:"' + label + ' Tenants"';
+    var dText  = extractFirstCSV_(GmailApp.search(dQuery, 0, 10), today);
+    var tText  = extractFirstCSV_(GmailApp.search(tQuery, 0, 10), today);
+
+    if (!dText) { allOk = false; lines.push('✗ ' + label + ' Delinquency — NOT received today'); }
+    else {
+      var dCheck = checkCSVShape_(dText, DCOL);
+      if (!dCheck.ok) { allOk = false; lines.push('⚠️ ' + label + ' Delinquency — received but ' + dCheck.reason); }
+      else lines.push('✓ ' + label + ' Delinquency — ' + dCheck.rowCount + ' row(s), parsed OK');
+    }
+
+    if (!tText) { allOk = false; lines.push('✗ ' + label + ' Tenants — NOT received today'); }
+    else {
+      var tCheck = checkCSVShape_(tText, TCOL);
+      if (!tCheck.ok) { allOk = false; lines.push('⚠️ ' + label + ' Tenants — received but ' + tCheck.reason); }
+      else lines.push('✓ ' + label + ' Tenants — ' + tCheck.rowCount + ' row(s), parsed OK');
+    }
+  });
+
+  var subject = (allOk ? '✅' : '⚠️') + ' Delinquency inbox check — ' + dateStr;
+  var body    = 'Daily post-launch inbox/parse check (auto-expires after 3 days — see installHealthCheckTriggers_).\n\n' + lines.join('\n');
+
+  var adminEmail = cfg_('ADMIN_EMAIL');
+  if (adminEmail) GmailApp.sendEmail(adminEmail, subject, body);
+  Logger.log(body);
+}
+
+// Confirms a CSV's header row has the columns a given COL map expects.
+function checkCSVShape_(text, colMap) {
+  var rows = Utilities.parseCsv(text);
+  if (rows.length < 1) return { ok: false, reason: 'empty file' };
+  var maxCol = 0;
+  Object.keys(colMap).forEach(function(k) { if (colMap[k] > maxCol) maxCol = colMap[k]; });
+  if (rows[0].length <= maxCol) {
+    return { ok: false, reason: 'only ' + rows[0].length + ' column(s) in header, expected at least ' + (maxCol + 1) };
+  }
+  return { ok: true, rowCount: Math.max(0, rows.length - 1) };
 }
 
 
