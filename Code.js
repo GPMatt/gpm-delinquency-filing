@@ -103,7 +103,7 @@ function runFiling_(labels, skipVictory, opts) {
 
   delinquents.resolved.forEach(function(row) {
     try {
-      var formData = buildFormData_(row, directory);
+      var formData = buildFormData_(row, directory, today);
       var pdfB64   = callCloudFunction_(formData);
       var blob     = makePDFBlob_(pdfB64, row, today);
       Logger.log('✓ ' + row.primaryName + ' — ' + row.street +
@@ -494,7 +494,7 @@ function extractUnitCore_(rawUnit) {
 // ============================================================
 // FORM DATA BUILDER
 // ============================================================
-function buildFormData_(row, directory) {
+function buildFormData_(row, directory, date) {
   var allTenants = lookupAllTenants_(row.rawAddr, row.rawUnit, directory);
 
   var primaryFmt = formatName_(row.primaryName);
@@ -516,6 +516,11 @@ function buildFormData_(row, directory) {
     landlord_name: row.owner,
     amount:        row.amount,
     served_on:     tenantNames,
+    // Fills the PDF's "Date" and "Date of Certificate Of Service" fields
+    // (main.py's fill_form reads data.notice_date). Previously never sent
+    // by either the scheduled or on-demand path — both left this blank
+    // on every filed DC 100a until 2026-09-09.
+    notice_date:   Utilities.formatDate(date || new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy'),
   };
 }
 
@@ -851,7 +856,7 @@ function webConfirmFiling(token, selectedIndices) {
 
   toFile.forEach(function(row) {
     try {
-      var formData = buildFormData_(row, data.directory);
+      var formData = buildFormData_(row, data.directory, today);
       var pdfB64   = callCloudFunction_(formData);
       var blob     = makePDFBlob_(pdfB64, row, today);
       var pm = row.pm || 'UNKNOWN';
@@ -1022,6 +1027,7 @@ function testSingleTenant() {
     landlord_name: '900 W Leonard LLC',
     amount:        '3,300.00',
     served_on:     'Yaser S. Kishawi',
+    notice_date:   Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy'),
   };
   var pdfB64 = callCloudFunction_(formData);
   var blob   = Utilities.newBlob(Utilities.base64Decode(pdfB64), 'application/pdf', 'TEST_Kishawi_Unit316.pdf');
