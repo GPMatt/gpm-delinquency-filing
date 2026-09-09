@@ -163,6 +163,11 @@
     <div id="previewTableWrap"></div>
   </div>
 
+  <div class="card" id="flaggedCard" hidden>
+    <p class="summary-line" id="flaggedSummary"></p>
+    <div id="flaggedTableWrap"></div>
+  </div>
+
   <div class="card" id="step3">
     <p class="summary-line">
       Confirm the names, addresses, and amounts above are correct. This will
@@ -185,6 +190,12 @@
   }).withFailureHandler(function(err) {
     document.getElementById('pmSelect').innerHTML = '<option value="">Failed to load</option>';
   }).webGetPmList();
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+    });
+  }
 
   function loadPreview() {
     var pm = document.getElementById('pmSelect').value;
@@ -217,10 +228,23 @@
     var warnEl = document.getElementById('previewWarnings');
     warnEl.innerHTML = '';
     if (result.missingLabels && result.missingLabels.length) {
-      warnEl.innerHTML += '<div class="warn">⚠️ No report found yet for: ' + result.missingLabels.join(', ') + '. Those properties will not be included.</div>';
+      warnEl.innerHTML += '<div class="warn">⚠️ No report found yet for: ' + escapeHtml(result.missingLabels.join(', ')) + '. Those properties will not be included.</div>';
     }
-    if (result.flaggedCount > 0) {
-      warnEl.innerHTML += '<div class="warn">⚠️ ' + result.flaggedCount + ' delinquent row(s) could not be matched to a property and will be skipped — admin has been notified separately.</div>';
+
+    var flaggedCard = document.getElementById('flaggedCard');
+    var flagged = result.flagged || [];
+    if (flagged.length > 0) {
+      flaggedCard.hidden = false;
+      document.getElementById('flaggedSummary').innerHTML =
+        '⚠️ ' + flagged.length + ' unit(s) couldn\'t be matched to a property and will <strong>not</strong> be filed — check these with the office:';
+      var frows = flagged.map(function(f) {
+        return '<tr><td>' + escapeHtml(f.name) + '</td><td>' + escapeHtml(f.address) +
+               (f.unit ? ' / ' + escapeHtml(f.unit) : '') + '</td><td>' + escapeHtml(f.reason) + '</td></tr>';
+      }).join('');
+      document.getElementById('flaggedTableWrap').innerHTML =
+        '<table><thead><tr><th>Name</th><th>Address / Unit</th><th>Why it was skipped</th></tr></thead><tbody>' + frows + '</tbody></table>';
+    } else {
+      flaggedCard.hidden = true;
     }
 
     var summaryEl = document.getElementById('previewSummary');
@@ -234,7 +258,7 @@
     } else {
       summaryEl.textContent = result.rows.length + ' notice(s) will be filed at $' + result.threshold + '+ owed:';
       var rows = result.rows.map(function(r) {
-        return '<tr><td>' + r.name + '</td><td>' + r.address + '</td><td class="amount">$' + r.amount + '</td></tr>';
+        return '<tr><td>' + escapeHtml(r.name) + '</td><td>' + escapeHtml(r.address) + '</td><td class="amount">$' + escapeHtml(r.amount) + '</td></tr>';
       }).join('');
       tableWrap.innerHTML = '<table><thead><tr><th>Name</th><th>Address</th><th>Amount</th></tr></thead><tbody>' + rows + '</tbody></table>';
       fileBtn.disabled = false;
@@ -274,6 +298,7 @@
     currentToken = null;
     document.getElementById('step2').style.display = 'none';
     document.getElementById('step3').style.display = 'none';
+    document.getElementById('flaggedCard').hidden = true;
     document.getElementById('fileResult').innerHTML = '';
     document.getElementById('fileError').innerHTML = '';
     document.getElementById('previewError').innerHTML = '';

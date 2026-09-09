@@ -277,6 +277,7 @@ function parseDelinquencyCSV_(text, sheet2Map, skipVictory, threshold) {
     if (skipVictory && normalizeAddrKey_(rawAddr) === victoryKey) { skipped++; continue; }
     if (isCommercialUnit_(rawUnit)) { skipped++; continue; }
     if (isSkippedProperty_(rawAddr)) { skipped++; continue; }
+    if (isCommercialTenantName_(name)) { skipped++; continue; }
 
     var result = resolveAddress_(rawAddr, rawUnit, sheet2Map);
     if (!result) { skipped++; continue; }
@@ -336,6 +337,20 @@ function isCommercialUnit_(unit) {
 function isSkippedProperty_(addr) {
   var a = addr.toLowerCase();
   return a.indexOf('prairie winds') >= 0 || a.indexOf('65 monroe') >= 0;
+}
+
+// Commercial tenants that should never be filed on regardless of which
+// unit/address they show up under. Match is a lowercase substring against
+// the delinquency CSV's Name column — add more as: 'a distinctive lowercase
+// fragment of the business name'.
+var COMMERCIAL_TENANT_NAMES = [
+  'family dollar',
+  'great lakes ace hardware',
+];
+
+function isCommercialTenantName_(name) {
+  var n = name.toLowerCase();
+  return COMMERCIAL_TENANT_NAMES.some(function(needle) { return n.indexOf(needle) >= 0; });
 }
 
 
@@ -808,7 +823,9 @@ function webPreview(thresholdRaw, initiator) {
         amount:  row.amount,
       };
     }),
-    flaggedCount:  delinquents.flagged.length,
+    flagged: delinquents.flagged.map(function(f) {
+      return { name: f.name, address: f.rawAddr, unit: f.rawUnit, reason: f.reason };
+    }),
     missingLabels: attachments.missingLabels,
   };
 }
