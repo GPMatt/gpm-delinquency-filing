@@ -91,6 +91,10 @@
   th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #eee2cc; }
   th { color: var(--brown); font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
   td.amount { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  th.check-col, td.check-col { width: 30px; text-align: center; padding: 8px 0; }
+  .row-check, #selectAll { width: 17px; height: 17px; cursor: pointer; }
+  tr.unchecked td { color: #b6a98d; }
+  tr.unchecked td.amount { color: #cdbfa0; }
   .summary-line { font-size: 14px; margin: 0 0 14px; color: #55493a; }
   .warn {
     background: #fbeee0;
@@ -256,20 +260,58 @@
       tableWrap.innerHTML = '<div class="empty">No tenants to file.</div>';
       fileBtn.disabled = true;
     } else {
-      summaryEl.textContent = result.rows.length + ' notice(s) will be filed at $' + result.threshold + '+ owed:';
-      var rows = result.rows.map(function(r) {
-        return '<tr><td>' + escapeHtml(r.name) + '</td><td>' + escapeHtml(r.address) + '</td><td class="amount">$' + escapeHtml(r.amount) + '</td></tr>';
+      var rows = result.rows.map(function(r, i) {
+        return '<tr data-row="' + i + '"><td class="check-col"><input type="checkbox" class="row-check" data-idx="' + i + '" checked></td>' +
+               '<td>' + escapeHtml(r.name) + '</td><td>' + escapeHtml(r.address) + '</td><td class="amount">$' + escapeHtml(r.amount) + '</td></tr>';
       }).join('');
-      tableWrap.innerHTML = '<table><thead><tr><th>Name</th><th>Address</th><th>Amount</th></tr></thead><tbody>' + rows + '</tbody></table>';
-      fileBtn.disabled = false;
+      tableWrap.innerHTML =
+        '<table><thead><tr><th class="check-col"><input type="checkbox" id="selectAll" checked></th><th>Name</th><th>Address</th><th>Amount</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody></table>';
+
+      document.getElementById('selectAll').addEventListener('change', function() {
+        var checked = this.checked;
+        document.querySelectorAll('.row-check').forEach(function(cb) { cb.checked = checked; updateRowStyle_(cb); });
+        updateSelectedSummary_();
+      });
+      document.querySelectorAll('.row-check').forEach(function(cb) {
+        cb.addEventListener('change', function() { updateRowStyle_(cb); updateSelectAllState_(); updateSelectedSummary_(); });
+      });
+
+      updateSelectedSummary_();
     }
 
     document.getElementById('step2').scrollIntoView({ behavior: 'smooth' });
   }
 
+  function updateRowStyle_(checkbox) {
+    var tr = checkbox.closest('tr');
+    if (tr) tr.classList.toggle('unchecked', !checkbox.checked);
+  }
+
+  function updateSelectAllState_() {
+    var boxes = document.querySelectorAll('.row-check');
+    var checkedCount = document.querySelectorAll('.row-check:checked').length;
+    var selectAll = document.getElementById('selectAll');
+    if (selectAll) selectAll.checked = checkedCount === boxes.length;
+  }
+
+  function updateSelectedSummary_() {
+    var total = document.querySelectorAll('.row-check').length;
+    var checkedCount = document.querySelectorAll('.row-check:checked').length;
+    var threshold = document.getElementById('thresholdInput').value;
+    document.getElementById('previewSummary').textContent =
+      checkedCount + ' of ' + total + ' notice(s) selected to file (met the $' + threshold + '+ threshold):';
+    document.getElementById('fileBtn').disabled = checkedCount === 0;
+  }
+
   function fileNow() {
     if (!currentToken) return;
-    if (!confirm('This will file real Demand for Possession notices. Continue?')) return;
+    var selectedIndices = Array.prototype.map.call(
+      document.querySelectorAll('.row-check:checked'),
+      function(cb) { return parseInt(cb.getAttribute('data-idx'), 10); }
+    );
+    if (selectedIndices.length === 0) return;
+    if (!confirm('This will file ' + selectedIndices.length + ' real Demand for Possession notice(s). Continue?')) return;
 
     var btn = document.getElementById('fileBtn');
     var errEl = document.getElementById('fileError');
@@ -291,7 +333,7 @@
         btn.textContent = "Let's File";
         errEl.innerHTML = '<div class="error">' + (err.message || err) + '</div>';
       })
-      .webConfirmFiling(currentToken);
+      .webConfirmFiling(currentToken, selectedIndices);
   }
 
   function resetForm() {

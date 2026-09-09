@@ -591,6 +591,7 @@ function sendPMEmails_(pmBlobs, flaggedRows, errors, missingLabels, date, meta) 
     ? 'Manual delinquency filing — initiated by ' + meta.initiator + ' — ' + dateStr + '\n\n'
     : 'Delinquency filing complete — ' + dateStr + '\n\n';
   if (meta.manual) summary += 'Threshold used: $' + Number(meta.threshold).toFixed(2) + '\n';
+  if (meta.manual && meta.deselected > 0) summary += meta.deselected + ' row(s) met the threshold but were unchecked by the PM and NOT filed.\n';
   summary += 'PDFs sent: ' + totalSent + '\n';
   Object.keys(pmChunks).forEach(function(pm) {
     var result = pmChunks[pm];
@@ -830,17 +831,25 @@ function webPreview(thresholdRaw, initiator) {
   };
 }
 
-// Files exactly what webPreview showed the PM, using the cached token.
-function webConfirmFiling(token) {
+// Files only the rows the PM checked in the preview (selectedIndices —
+// positions into the resolved array webPreview returned, same order as
+// the `rows` list shown in the UI), using the cached token.
+function webConfirmFiling(token, selectedIndices) {
   var data = cacheGetJSON_(token);
   if (!data) throw new Error('This preview has expired. Please refresh and try again.');
   cacheRemoveJSON_(token);
+
+  var indices = Array.isArray(selectedIndices) ? selectedIndices : [];
+  var toFile  = indices
+    .map(function(i) { return data.resolved[i]; })
+    .filter(function(row) { return !!row; });
+  if (toFile.length === 0) throw new Error('No units were selected to file.');
 
   var today   = new Date();
   var pmBlobs = {};
   var errors  = [];
 
-  data.resolved.forEach(function(row) {
+  toFile.forEach(function(row) {
     try {
       var formData = buildFormData_(row, data.directory);
       var pdfB64   = callCloudFunction_(formData);
@@ -854,9 +863,10 @@ function webConfirmFiling(token) {
   });
 
   sendPMEmails_(pmBlobs, data.flagged, errors, data.missingLabels, today, {
-    manual:    true,
-    initiator: data.initiator,
-    threshold: data.threshold,
+    manual:      true,
+    initiator:   data.initiator,
+    threshold:   data.threshold,
+    deselected:  data.resolved.length - toFile.length,
   });
 
   return {
