@@ -519,8 +519,10 @@ function buildFormData_(row, directory, date) {
     // Fills the PDF's "Date" and "Date of Certificate Of Service" fields
     // (main.py's fill_form reads data.notice_date). Previously never sent
     // by either the scheduled or on-demand path — both left this blank
-    // on every filed DC 100a until 2026-09-09.
-    notice_date:   Utilities.formatDate(date || new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy'),
+    // on every filed DC 100a until 2026-09-09. Pinned to America/New_York
+    // (Eastern) explicitly rather than relying on the script's project
+    // timezone, so this stays correct even if that ever changes.
+    notice_date:   Utilities.formatDate(date || new Date(), 'America/New_York', 'MM/dd/yyyy'),
   };
 }
 
@@ -1027,7 +1029,7 @@ function testSingleTenant() {
     landlord_name: '900 W Leonard LLC',
     amount:        '3,300.00',
     served_on:     'Yaser S. Kishawi',
-    notice_date:   Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy'),
+    notice_date:   Utilities.formatDate(new Date(), 'America/New_York', 'MM/dd/yyyy'),
   };
   var pdfB64 = callCloudFunction_(formData);
   var blob   = Utilities.newBlob(Utilities.base64Decode(pdfB64), 'application/pdf', 'TEST_Kishawi_Unit316.pdf');
