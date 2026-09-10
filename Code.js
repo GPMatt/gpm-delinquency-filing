@@ -901,7 +901,7 @@ function installTrigger() {
 
 // ============================================================
 // LAUNCH HEALTH CHECK — one-time, self-deleting, 3 days only
-// Run installHealthCheckTriggers_() ONCE from the editor (Run menu) to
+// Run installHealthCheckTriggers() ONCE from the editor (Run menu) to
 // verify the on-demand pipeline: did today's AppFolio emails arrive, and
 // did they parse into the expected columns? No infra beyond this script
 // is needed — it reuses the same Gmail access and ADMIN_EMAIL already
@@ -909,17 +909,17 @@ function installTrigger() {
 // once and Apps Script removes it automatically — nothing to clean up
 // after day 3, and no calendar-style upkeep in the meantime.
 // ============================================================
-function installHealthCheckTriggers_() {
+function installHealthCheckTriggers() {
   ScriptApp.getProjectTriggers().forEach(function(t) {
-    if (t.getHandlerFunction() === 'checkInboxHealth_') ScriptApp.deleteTrigger(t);
+    if (t.getHandlerFunction() === 'checkInboxHealth') ScriptApp.deleteTrigger(t);
   });
   for (var i = 1; i <= 3; i++) {
     var d = new Date();
     d.setDate(d.getDate() + i);
     d.setHours(10, 0, 0, 0); // 10 AM script timezone (America/Detroit) — after AppFolio's morning send
-    ScriptApp.newTrigger('checkInboxHealth_').timeBased().at(d).create();
+    ScriptApp.newTrigger('checkInboxHealth').timeBased().at(d).create();
   }
-  Logger.log('Installed 3 one-time checkInboxHealth_ triggers, 10 AM ET each of the next 3 days. Each self-deletes after firing.');
+  Logger.log('Installed 3 one-time checkInboxHealth triggers, 10 AM ET each of the next 3 days. Each self-deletes after firing.');
 }
 
 // Checks every property label for today's Delinquency + Tenants email,
@@ -927,7 +927,7 @@ function installHealthCheckTriggers_() {
 // filing anything. Emails a pass/fail summary to ADMIN_EMAIL. Safe to
 // run manually any time — this is also the function the 3-day triggers
 // call, and what to run by hand tomorrow to check today's emails now.
-function checkInboxHealth_() {
+function checkInboxHealth() {
   var sender  = cfg_('APPFOLIO_EMAIL_SENDER') || 'appfolio.com';
   var today   = new Date();
   var dateStr = Utilities.formatDate(today, Session.getScriptTimeZone(), 'MMMM d, yyyy');
@@ -956,7 +956,7 @@ function checkInboxHealth_() {
   });
 
   var subject = (allOk ? '✅' : '⚠️') + ' Delinquency inbox check — ' + dateStr;
-  var body    = 'Daily post-launch inbox/parse check (auto-expires after 3 days — see installHealthCheckTriggers_).\n\n' + lines.join('\n');
+  var body    = 'Daily post-launch inbox/parse check (auto-expires after 3 days — see installHealthCheckTriggers).\n\n' + lines.join('\n');
 
   var adminEmail = cfg_('ADMIN_EMAIL');
   if (adminEmail) GmailApp.sendEmail(adminEmail, subject, body);
