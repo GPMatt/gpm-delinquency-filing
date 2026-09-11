@@ -46,12 +46,12 @@ var ALL_LABELS = ['Jefferson', 'Oakwood', 'Pinery', 'IVA', 'AF11', 'VoL'];
 
 // Names shown in the "Let's File" web app dropdown — must match Sheet2's PM column values,
 // except ADMIN_INITIATORS entries (see below), which aren't a Sheet2 PM and bypass the filter.
-var PM_LIST = ['Jody Betsch', 'Blake Roush', 'Mike Green', "Jill O'Donnell", 'Laura Porter'];
+var PM_LIST = ['Jody Betsch', 'Blake Roush', 'Mike Green', "Jill O'Donnell", 'Laura Porter', 'Matthieu Fournier'];
 
 // Initiators who see/file every property's delinquencies in the on-demand app instead of
 // only rows where Sheet2's PM column matches their name. Not tied to any Sheet2 property —
 // filed notices still route to each row's actual Sheet2 PM, never to an admin initiator.
-var ADMIN_INITIATORS = ['Laura Porter'];
+var ADMIN_INITIATORS = ['Laura Porter', 'Matthieu Fournier'];
 
 var AMOUNT_THRESHOLD = 100;
 var VICTORY_STREET   = '900 Leonard St NW';
@@ -316,7 +316,7 @@ function parseDelinquencyCSV_(text, sheet2Map, skipVictory, threshold) {
 }
 
 // Tenant directory columns: Property, Unit, Tenant, Tenant Type
-var TCOL = { PROPERTY: 0, UNIT: 1, TENANT: 2, TYPE: 3 };
+var TCOL = { PROPERTY: 0, UNIT: 1, TENANT: 2, TYPE: 3, EMAIL: 4 };
 
 function parseTenantDirectory_(text) {
   var rows = Utilities.parseCsv(text);
@@ -328,8 +328,9 @@ function parseTenantDirectory_(text) {
     var unit     = (r[TCOL.UNIT]     || '').trim();
     var tenant   = (r[TCOL.TENANT]   || '').trim();
     var type_    = (r[TCOL.TYPE]     || '').trim();
+    var email    = (r[TCOL.EMAIL]    || '').trim();
     if (!tenant || !property) continue;
-    out.push({ property: property, unit: unit, tenant: tenant, tenantType: type_ });
+    out.push({ property: property, unit: unit, tenant: tenant, tenantType: type_, email: email });
   }
   return out;
 }
@@ -513,7 +514,9 @@ function extractUnitCore_(rawUnit) {
 function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
   // row.unit (decoded, e.g. "5A") not row.rawUnit ("Unit 5A") — the Tenant Directory's
   // Unit column is already bare like the decoded form, not AppFolio's raw prefixed value.
-  var allTenants = lookupAllTenants_(row.sheetKey, row.unit, directory, sheet2Map, directoryKeyCache);
+  // Co-signers are never named/served on the notice — only Financially Responsible occupants.
+  var allTenants = lookupAllTenants_(row.sheetKey, row.unit, directory, sheet2Map, directoryKeyCache)
+    .filter(function(t) { return normalizeForMatch_(t.tenantType) !== 'co-signer'; });
 
   var primaryFmt = formatName_(row.primaryName);
   var otherNames = allTenants
@@ -523,6 +526,10 @@ function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
     .map(function(t) { return formatName_(t.tenant); });
 
   var tenantNames = [primaryFmt].concat(otherNames).join(', ');
+
+  var emails = allTenants
+    .map(function(t) { return (t.email || '').trim(); })
+    .filter(function(e, i, arr) { return e && arr.indexOf(e) === i; }); // non-blank, deduped
 
   return {
     tenant_names:  tenantNames,
@@ -534,6 +541,10 @@ function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
     landlord_name: row.owner,
     amount:        row.amount,
     served_on:     tenantNames,
+    // Fills the PDF's "electronic service address" field — checked in place of
+    // first class mail (main.py's CHECKBOX_ON/OFF) since notices are now served
+    // electronically. Co-signers excluded above, so this matches tenant_names.
+    electronic_service_email: emails.join(', '),
     // Fills the PDF's "Date" and "Date of Certificate Of Service" fields
     // (main.py's fill_form reads data.notice_date). Previously never sent
     // by either the scheduled or on-demand path — both left this blank
