@@ -505,7 +505,9 @@ function extractUnitCore_(rawUnit) {
 // FORM DATA BUILDER
 // ============================================================
 function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
-  var allTenants = lookupAllTenants_(row.sheetKey, row.rawUnit, directory, sheet2Map, directoryKeyCache);
+  // row.unit (decoded, e.g. "5A") not row.rawUnit ("Unit 5A") — the Tenant Directory's
+  // Unit column is already bare like the decoded form, not AppFolio's raw prefixed value.
+  var allTenants = lookupAllTenants_(row.sheetKey, row.unit, directory, sheet2Map, directoryKeyCache);
 
   var primaryFmt = formatName_(row.primaryName);
   var otherNames = allTenants
@@ -565,12 +567,19 @@ function resolveDirectoryPropertyKey_(propertyNickname, sheet2Map, cache) {
   return key;
 }
 
-function lookupAllTenants_(sheetKey, rawUnit, directory, sheet2Map, directoryKeyCache) {
-  var unitNorm = rawUnit.toLowerCase().trim();
+// "N/A" (single-unit properties in the Tenant Directory) should match the
+// decoded '' unit decodeUnit_ produces for single-unit Sheet2 rows.
+function normalizeUnitForMatch_(u) {
+  var s = (u || '').toLowerCase().trim();
+  return (s === 'n/a' || s === 'na') ? '' : s;
+}
+
+function lookupAllTenants_(sheetKey, unit, directory, sheet2Map, directoryKeyCache) {
+  var unitNorm = normalizeUnitForMatch_(unit);
   return directory.filter(function(entry) {
     if (!entry.tenant) return false;
     if (resolveDirectoryPropertyKey_(entry.property, sheet2Map, directoryKeyCache) !== sheetKey) return false;
-    return entry.unit.toLowerCase().trim() === unitNorm;
+    return normalizeUnitForMatch_(entry.unit) === unitNorm;
   });
 }
 
@@ -820,11 +829,11 @@ function cacheRemoveJSON_(token) {
 function filterRelevantDirectory_(directory, resolvedRows, sheet2Map, directoryKeyCache) {
   var wanted = {};
   resolvedRows.forEach(function(row) {
-    wanted[row.sheetKey + '|' + row.rawUnit.toLowerCase().trim()] = true;
+    wanted[row.sheetKey + '|' + normalizeUnitForMatch_(row.unit)] = true;
   });
   return directory.filter(function(entry) {
     var key = resolveDirectoryPropertyKey_(entry.property, sheet2Map, directoryKeyCache);
-    return wanted[key + '|' + entry.unit.toLowerCase().trim()];
+    return wanted[key + '|' + normalizeUnitForMatch_(entry.unit)];
   });
 }
 
