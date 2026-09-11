@@ -449,14 +449,20 @@ function makeResult_(parsed, unit, row) {
   };
 }
 
-// Find Sheet2 row whose key starts with "streetNum|"
+// Find Sheet2 row whose key starts with "streetNum|". Matches on house number
+// alone, so two properties sharing a leading number (e.g. "411 College Ave SW"
+// vs "411 Paris Ave SE") are ambiguous — fail safe (null, same as no match)
+// instead of silently guessing whichever row happens to come first in the
+// sheet, and log it so an ambiguity is diagnosable instead of invisible.
 function lookupByStreetNum_(streetNum, sheet2Map) {
-  var prefix = streetNum + '|';
-  var keys   = Object.keys(sheet2Map);
-  for (var i = 0; i < keys.length; i++) {
-    if (keys[i].indexOf(prefix) === 0) return sheet2Map[keys[i]];
+  var prefix  = streetNum + '|';
+  var matches = Object.keys(sheet2Map).filter(function(k) { return k.indexOf(prefix) === 0; });
+  if (matches.length > 1) {
+    Logger.log('AMBIGUOUS street number ' + streetNum + ': ' +
+               matches.map(function(k) { return sheet2Map[k].addy; }).join(' | '));
+    return null;
   }
-  return null;
+  return matches.length === 1 ? sheet2Map[matches[0]] : null;
 }
 
 // Handle address-prefixed units: "2715 McKee Ave SW 16" → row for 2715 McKee, unit "16"
