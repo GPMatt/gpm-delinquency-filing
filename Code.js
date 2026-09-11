@@ -44,8 +44,14 @@ var PROPERTY_GROUPS = {
 
 var ALL_LABELS = ['Jefferson', 'Oakwood', 'Pinery', 'IVA', 'AF11', 'VoL'];
 
-// Names shown in the "Let's File" web app dropdown — must match Sheet2's PM column values.
-var PM_LIST = ['Jody Betsch', 'Blake Roush', 'Mike Green', "Jill O'Donnell"];
+// Names shown in the "Let's File" web app dropdown — must match Sheet2's PM column values,
+// except ADMIN_INITIATORS entries (see below), which aren't a Sheet2 PM and bypass the filter.
+var PM_LIST = ['Jody Betsch', 'Blake Roush', 'Mike Green', "Jill O'Donnell", 'Laura Porter'];
+
+// Initiators who see/file every property's delinquencies in the on-demand app instead of
+// only rows where Sheet2's PM column matches their name. Not tied to any Sheet2 property —
+// filed notices still route to each row's actual Sheet2 PM, never to an admin initiator.
+var ADMIN_INITIATORS = ['Laura Porter'];
 
 var AMOUNT_THRESHOLD = 100;
 var VICTORY_STREET   = '900 Leonard St NW';
@@ -100,10 +106,11 @@ function runFiling_(labels, skipVictory, opts) {
 
   var pmBlobs = {};
   var errors  = [];
+  var directoryKeyCache = {};
 
   delinquents.resolved.forEach(function(row) {
     try {
-      var formData = buildFormData_(row, directory, today);
+      var formData = buildFormData_(row, directory, today, sheet2Map, directoryKeyCache);
       var pdfB64   = callCloudFunction_(formData);
       var blob     = makePDFBlob_(pdfB64, row, today);
       Logger.log('✓ ' + row.primaryName + ' — ' + row.street +
@@ -132,7 +139,8 @@ function loadSheet2_() {
   if (!id) { Logger.log('SHEET2_ID not set.'); return null; }
   try {
     var ss    = SpreadsheetApp.openById(id);
-    var sheet = ss.getSheetByName('Sheet2') || ss.getSheets()[0];
+    var sheet = ss.getSheetByName('Delinquency Info');
+    if (!sheet) { Logger.log('ERROR: "Delinquency Info" tab not found in Sheet2 spreadsheet.'); return null; }
     var data  = sheet.getDataRange().getValues();
     if (data.length < 2) { Logger.log('Sheet2 appears empty.'); return null; }
 
@@ -297,6 +305,7 @@ function parseDelinquencyCSV_(text, sheet2Map, skipVictory, threshold) {
       zip:         result.zip,
       owner:       result.owner,
       pm:          result.pm,
+      sheetKey:    result.sheetKey,
       rawAddr:     rawAddr,
       rawUnit:     rawUnit,
       amount:      formatAmount_(amount),
@@ -428,14 +437,15 @@ function resolveAddress_(rawAddr, rawUnit, sheet2Map) {
 
 function makeResult_(parsed, unit, row) {
   return {
-    street: parsed.street,
-    unit:   unit,
-    city:   parsed.city,
-    state:  parsed.state,
-    zip:    parsed.zip,
-    owner:  row.owner,
-    pm:     row.pm,
-    flag:   false,
+    street:   parsed.street,
+    unit:     unit,
+    city:     parsed.city,
+    state:    parsed.state,
+    zip:      parsed.zip,
+    owner:    row.owner,
+    pm:       row.pm,
+    sheetKey: normalizeAddrKey_(row.addy),
+    flag:     false,
   };
 }
 
@@ -494,8 +504,8 @@ function extractUnitCore_(rawUnit) {
 // ============================================================
 // FORM DATA BUILDER
 // ============================================================
-function buildFormData_(row, directory, date) {
-  var allTenants = lookupAllTenants_(row.rawAddr, row.rawUnit, directory);
+function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
+  var allTenants = lookupAllTenants_(row.sheetKey, row.rawUnit, directory, sheet2Map, directoryKeyCache);
 
   var primaryFmt = formatName_(row.primaryName);
   var otherNames = allTenants
@@ -527,12 +537,39 @@ function buildFormData_(row, directory, date) {
 }
 
 // All tenant types included (Responsible, Cosigner, Non-Responsible)
-function lookupAllTenants_(rawAddr, rawUnit, directory) {
-  var addrKey  = normalizeAddrKey_(rawAddr);
+// Tenant Directory "Property" values are AppFolio nicknames (e.g. "The Oakwood - 547"),
+// not raw street addresses — normalizeAddrKey_ can't parse those directly since it
+// requires the string to start with the house number. Resolve each nickname to the
+// same canonical Sheet2 key the delinquency row already resolved to (via sheetKey),
+// same street-number lookup the other special-case address branches already use,
+// instead of comparing nickname text to street-address text.
+function resolveDirectoryPropertyKey_(propertyNickname, sheet2Map, cache) {
+  if (Object.prototype.hasOwnProperty.call(cache, propertyNickname)) return cache[propertyNickname];
+
+  var key = null;
+
+  // Fast path: nickname is already a plain address Sheet2 recognizes directly
+  var directKey = normalizeAddrKey_(propertyNickname);
+  if (directKey && sheet2Map[directKey]) {
+    key = directKey;
+  } else {
+    // Nickname format like "The Oakwood - 547" — pull the trailing street number
+    var numMatch = propertyNickname.match(/(\d+)(?!.*\d)/);
+    if (numMatch) {
+      var row = lookupByStreetNum_(numMatch[1], sheet2Map);
+      if (row) key = normalizeAddrKey_(row.addy);
+    }
+  }
+
+  cache[propertyNickname] = key; // cache misses too (null) to avoid re-scanning Sheet2
+  return key;
+}
+
+function lookupAllTenants_(sheetKey, rawUnit, directory, sheet2Map, directoryKeyCache) {
   var unitNorm = rawUnit.toLowerCase().trim();
   return directory.filter(function(entry) {
     if (!entry.tenant) return false;
-    if (normalizeAddrKey_(entry.property) !== addrKey) return false;
+    if (resolveDirectoryPropertyKey_(entry.property, sheet2Map, directoryKeyCache) !== sheetKey) return false;
     return entry.unit.toLowerCase().trim() === unitNorm;
   });
 }
@@ -780,13 +817,14 @@ function cacheRemoveJSON_(token) {
 // Shrinks the tenant directory to just the units that actually have a
 // delinquent row — the only entries buildFormData_ will ever look up —
 // instead of caching every tenant company-wide.
-function filterRelevantDirectory_(directory, resolvedRows) {
+function filterRelevantDirectory_(directory, resolvedRows, sheet2Map, directoryKeyCache) {
   var wanted = {};
   resolvedRows.forEach(function(row) {
-    wanted[normalizeAddrKey_(row.rawAddr) + '|' + row.rawUnit.toLowerCase().trim()] = true;
+    wanted[row.sheetKey + '|' + row.rawUnit.toLowerCase().trim()] = true;
   });
   return directory.filter(function(entry) {
-    return wanted[normalizeAddrKey_(entry.property) + '|' + entry.unit.toLowerCase().trim()];
+    var key = resolveDirectoryPropertyKey_(entry.property, sheet2Map, directoryKeyCache);
+    return wanted[key + '|' + entry.unit.toLowerCase().trim()];
   });
 }
 
@@ -809,14 +847,23 @@ function webPreview(thresholdRaw, initiator) {
 
   var directory   = attachments.directoryText ? parseTenantDirectory_(attachments.directoryText) : [];
   var delinquents = parseDelinquencyCSV_(attachments.delinquencyText, sheet2Map, false, threshold);
-  var relevantDir = filterRelevantDirectory_(directory, delinquents.resolved);
+
+  // PMs only see their own properties (Sheet2 PM column). ADMIN_INITIATORS bypass this
+  // and see everything, but filed notices still route to each row's actual Sheet2 PM.
+  var isAdmin = ADMIN_INITIATORS.indexOf(initiator) >= 0;
+  var resolvedForPM = isAdmin
+    ? delinquents.resolved
+    : delinquents.resolved.filter(function(row) { return row.pm === initiator; });
+
+  var directoryKeyCache = {};
+  var relevantDir = filterRelevantDirectory_(directory, resolvedForPM, sheet2Map, directoryKeyCache);
 
   var token = Utilities.getUuid();
   cachePutJSON_(token, {
     threshold:     threshold,
     initiator:     initiator,
     directory:     relevantDir,
-    resolved:      delinquents.resolved,
+    resolved:      resolvedForPM,
     flagged:       delinquents.flagged,
     missingLabels: attachments.missingLabels,
   }); // 30 min TTL — long enough to review, short enough to force a refetch if stale
@@ -824,7 +871,7 @@ function webPreview(thresholdRaw, initiator) {
   return {
     token:         token,
     threshold:     threshold,
-    rows: delinquents.resolved.map(function(row) {
+    rows: resolvedForPM.map(function(row) {
       return {
         name:    row.primaryName,
         address: row.street + (row.unit ? ', Unit ' + row.unit : '') + ', ' + row.city + ', ' + row.state + ' ' + row.zip,
@@ -855,10 +902,12 @@ function webConfirmFiling(token, selectedIndices) {
   var today   = new Date();
   var pmBlobs = {};
   var errors  = [];
+  var sheet2Map = loadSheet2_();
+  var directoryKeyCache = {};
 
   toFile.forEach(function(row) {
     try {
-      var formData = buildFormData_(row, data.directory, today);
+      var formData = buildFormData_(row, data.directory, today, sheet2Map, directoryKeyCache);
       var pdfB64   = callCloudFunction_(formData);
       var blob     = makePDFBlob_(pdfB64, row, today);
       var pm = row.pm || 'UNKNOWN';
