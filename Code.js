@@ -545,31 +545,25 @@ function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
 }
 
 // All tenant types included (Responsible, Cosigner, Non-Responsible)
-// Tenant Directory "Property" values are AppFolio nicknames (e.g. "The Oakwood - 547"),
-// not raw street addresses — normalizeAddrKey_ can't parse those directly since it
-// requires the string to start with the house number. Resolve each nickname to the
-// same canonical Sheet2 key the delinquency row already resolved to (via sheetKey),
-// same street-number lookup the other special-case address branches already use,
-// instead of comparing nickname text to street-address text.
+// Tenant Directory "Property" values are AppFolio nicknames — either the full
+// address on its own (e.g. "11075 52nd Ave Allendale, MI 49401") or a friendly
+// label with the full address repeated after it (e.g. "The Oakwood - 547
+// Cherry St SE Grand Rapids, MI 49503", "Cardinal Point - 445 Knapp St NE
+// Grand Rapids, MI 49505"). Strip to the address portion (after the last
+// " - ", if present) and run it through the same normalizeAddrKey_ every
+// other address in this file resolves through — full street-number+name key,
+// not just the number, so unlike a house-number-only lookup this can't
+// collide with an unrelated property that happens to share a leading number.
 function resolveDirectoryPropertyKey_(propertyNickname, sheet2Map, cache) {
   if (Object.prototype.hasOwnProperty.call(cache, propertyNickname)) return cache[propertyNickname];
 
-  var key = null;
+  var dashIdx  = propertyNickname.lastIndexOf(' - ');
+  var addrPart = dashIdx >= 0 ? propertyNickname.slice(dashIdx + 3) : propertyNickname;
 
-  // Fast path: nickname is already a plain address Sheet2 recognizes directly
-  var directKey = normalizeAddrKey_(propertyNickname);
-  if (directKey && sheet2Map[directKey]) {
-    key = directKey;
-  } else {
-    // Nickname format like "The Oakwood - 547" — pull the trailing street number
-    var numMatch = propertyNickname.match(/(\d+)(?!.*\d)/);
-    if (numMatch) {
-      var row = lookupByStreetNum_(numMatch[1], sheet2Map);
-      if (row) key = normalizeAddrKey_(row.addy);
-    }
-  }
+  var key = normalizeAddrKey_(addrPart);
+  if (key && !sheet2Map[key]) key = null; // parsed but no matching Sheet2 row — don't guess further
 
-  cache[propertyNickname] = key; // cache misses too (null) to avoid re-scanning Sheet2
+  cache[propertyNickname] = key; // cache misses too (null) to avoid re-parsing
   return key;
 }
 
