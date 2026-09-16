@@ -50,7 +50,7 @@ var PM_LIST = ['Jody Betsch', 'Blake Roush', 'Mike Green', "Jill O'Donnell", 'La
 
 // Initiators who see/file every property's delinquencies in the on-demand app instead of
 // only rows where Sheet2's PM column matches their name. Not tied to any Sheet2 property —
-// filed notices still route to each row's actual Sheet2 PM, never to an admin initiator.
+// filed notices go to the initiator, regardless of the row's actual Sheet2 PM.
 var ADMIN_INITIATORS = ['Laura Porter', 'Matthieu Fournier'];
 
 var AMOUNT_THRESHOLD = 100;
@@ -930,7 +930,11 @@ function webConfirmFiling(token, selectedIndices) {
       var formData = buildFormData_(row, data.directory, today, sheet2Map, directoryKeyCache);
       var pdfB64   = callCloudFunction_(formData);
       var blob     = makePDFBlob_(pdfB64, row, today);
-      var pm = row.pm || 'UNKNOWN';
+      // Route to whoever initiated this on-demand filing, not the row's Sheet2 PM —
+      // for non-admins these are always the same person (webPreview filters to their
+      // own rows); for ADMIN_INITIATORS this sends the notice to the admin instead of
+      // silently emailing the property's actual PM.
+      var pm = data.initiator;
       if (!pmBlobs[pm]) pmBlobs[pm] = [];
       pmBlobs[pm].push(blob);
     } catch (e) {
