@@ -218,7 +218,12 @@ function findEmailAttachmentsBySubject_(labels, useLatest) {
 function extractFirstCSV_(threads, targetDate) {
   for (var i = 0; i < threads.length; i++) {
     var messages = threads[i].getMessages();
-    for (var j = 0; j < messages.length; j++) {
+    // AppFolio reuses the same subject every day, so Gmail groups these into one
+    // long-running thread. getMessages() returns oldest-first, so without this we'd
+    // grab the CSV from the very first email ever sent in the thread instead of the
+    // most recent one — stale tenant/delinquency data (2026-09-16: missing an
+    // e-service email added to the directory after the thread's first message).
+    for (var j = messages.length - 1; j >= 0; j--) {
       var msg = messages[j];
       if (targetDate) {
         var d = msg.getDate();
