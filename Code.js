@@ -46,7 +46,7 @@ var ALL_LABELS = ['Jefferson', 'Oakwood', 'Pinery', 'IVA', 'AF11', 'VoL'];
 
 // Names shown in the "Let's File" web app dropdown — must match Sheet2's PM column values,
 // except ADMIN_INITIATORS entries (see below), which aren't a Sheet2 PM and bypass the filter.
-var PM_LIST = ['Jody Betsch', 'Blake Roush', 'Mike Green', "Jill O'Donnell", 'Laura Porter', 'Matthieu Fournier'];
+var PM_LIST = ['Jody Betsch', 'Blake Roush', 'Mike Green', 'Laura Porter', 'Matthieu Fournier'];
 
 // Initiators who see/file every property's delinquencies in the on-demand app instead of
 // only rows where Sheet2's PM column matches their name. Not tied to any Sheet2 property —
