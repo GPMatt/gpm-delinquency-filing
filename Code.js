@@ -23,6 +23,9 @@
 // SCHEDULE (fallback — always runs regardless of the web app):
 //   4th of month — Victory on Leonard (VoL) only
 //   6th of month — all other properties (Jefferson, Oakwood, Pinery, IVA, AF11)
+//   If the 4th/6th falls on a weekend or a court holiday, the run shifts to
+//   the next court business day and uses THAT day's date and AppFolio data
+//   (see dailyFilingCheck_ / effectiveFilingDate_ / isCourtHoliday_).
 //
 // ON-DEMAND WEB APP:
 //   Deploy → New deployment → Web app. Execute as: Me. Access: Anyone
@@ -962,18 +965,93 @@ function webConfirmFiling(token, selectedIndices) {
 
 
 // ============================================================
-// SETUP — two monthly triggers at 9 AM ET
+// SETUP — one daily dispatcher trigger at 9 AM ET
+// Replaces the old fixed onMonthDay(4)/onMonthDay(6) triggers, which fired
+// on those calendar days even on a weekend/court holiday when nobody could
+// actually file. Now a single daily trigger checks whether TODAY is the
+// effective filing day (the 4th/6th, or — if that date falls on a weekend
+// or a court holiday — the next court business day), and runs using that
+// day's date and that day's AppFolio data, same as any other scheduled run.
 // ============================================================
 function installTrigger() {
   ScriptApp.getProjectTriggers().forEach(function(t) {
     var fn = t.getHandlerFunction();
-    if (fn === 'runVictoryFiling' || fn === 'runStandardFiling') ScriptApp.deleteTrigger(t);
+    if (fn === 'runVictoryFiling' || fn === 'runStandardFiling' || fn === 'dailyFilingCheck_') {
+      ScriptApp.deleteTrigger(t);
+    }
   });
-  ScriptApp.newTrigger('runVictoryFiling')
-    .timeBased().onMonthDay(4).atHour(9).inTimezone('America/Detroit').create();
-  ScriptApp.newTrigger('runStandardFiling')
-    .timeBased().onMonthDay(6).atHour(9).inTimezone('America/Detroit').create();
-  Logger.log('Triggers installed: runVictoryFiling on 4th, runStandardFiling on 6th — 9 AM Eastern.');
+  ScriptApp.newTrigger('dailyFilingCheck_')
+    .timeBased().everyDays(1).atHour(9).inTimezone('America/Detroit').create();
+  Logger.log('Trigger installed: dailyFilingCheck_ daily at 9 AM Eastern — fires runVictoryFiling ' +
+             'on the effective 4th and runStandardFiling on the effective 6th (weekend/holiday-shifted).');
+}
+
+// Called by the daily trigger. Fires the real filing functions only on
+// their effective day (see effectiveFilingDate_ below); a no-op every
+// other day.
+function dailyFilingCheck_() {
+  var today = new Date();
+  if (sameDate_(today, effectiveFilingDate_(4, today))) runVictoryFiling();
+  if (sameDate_(today, effectiveFilingDate_(6, today))) runStandardFiling();
+}
+
+// The day a filing scheduled for `targetDay` of the month actually runs:
+// targetDay itself, unless that date is a weekend or court holiday, in
+// which case it rolls forward to the next court business day (handles
+// cascading cases too, e.g. a Sunday 6th that rolls into a Monday holiday
+// rolls again to Tuesday).
+function effectiveFilingDate_(targetDay, monthDate) {
+  var d = new Date(monthDate.getFullYear(), monthDate.getMonth(), targetDay);
+  return nextCourtBusinessDay_(d);
+}
+
+function sameDate_(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function nextCourtBusinessDay_(date) {
+  var d = new Date(date);
+  while (!isCourtBusinessDay_(d)) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+function isCourtBusinessDay_(date) {
+  var dow = date.getDay();
+  if (dow === 0 || dow === 6) return false; // Sun/Sat
+  return !isCourtHoliday_(date);
+}
+
+// Standard federal holiday list (Michigan courts follow this). Edit here
+// if GPM's filing venues observe a different set.
+function isCourtHoliday_(date) {
+  var y   = date.getFullYear();
+  var m   = date.getMonth();
+  var day = date.getDate();
+  var md  = function(mm, dd) { return m === mm && day === dd; };
+  var nthWeekday = function(month, weekday, n) {
+    var d = new Date(y, month, 1);
+    var count = 0;
+    while (true) {
+      if (d.getDay() === weekday) { count++; if (count === n) return d.getDate(); }
+      d.setDate(d.getDate() + 1);
+    }
+  };
+  var lastWeekday = function(month, weekday) {
+    var d = new Date(y, month + 1, 0); // last day of month
+    while (d.getDay() !== weekday) d.setDate(d.getDate() - 1);
+    return d.getDate();
+  };
+  if (md(0, 1))                             return true;  // New Year's Day
+  if (m === 0  && day === nthWeekday(0, 1, 3))  return true;  // MLK Day — 3rd Mon Jan
+  if (m === 1  && day === nthWeekday(1, 1, 3))  return true;  // Presidents Day — 3rd Mon Feb
+  if (m === 4  && day === lastWeekday(4, 1))    return true;  // Memorial Day — last Mon May
+  if (md(5, 19))                            return true;  // Juneteenth
+  if (md(6, 4))                             return true;  // Independence Day
+  if (m === 8  && day === nthWeekday(8, 1, 1))  return true;  // Labor Day — 1st Mon Sep
+  if (md(10, 11))                           return true;  // Veterans Day
+  if (m === 10 && day === nthWeekday(10, 4, 4)) return true;  // Thanksgiving — 4th Thu Nov
+  if (md(11, 25))                           return true;  // Christmas Day
+  return false;
 }
 
 
