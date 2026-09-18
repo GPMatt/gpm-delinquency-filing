@@ -533,9 +533,10 @@ function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
     })
     .map(function(t) { return formatName_(t.tenant); });
 
-  // "and all other occupants" is standard boilerplate on this notice — covers
-  // anyone living there who isn't named as a financially responsible tenant.
-  var tenantNames = [primaryFmt].concat(otherNames).join(', ') + ' and all other occupants';
+  // NOTE: do not append "and all other occupants" here — the Cloud Function
+  // (main.py's fill_form) already appends it to both the address block and
+  // "I served this notice on Name" fields. Adding it here too double-prints it.
+  var tenantNames = [primaryFmt].concat(otherNames).join(', ');
 
   var emails = allTenants
     .map(function(t) { return (t.email || '').trim(); })
