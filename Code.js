@@ -596,10 +596,39 @@ function normalizeUnitForMatch_(u) {
   return (s === 'n/a' || s === 'na') ? '' : s;
 }
 
+// Eaglebrook is ~9 separately-addressed buildings (5943/5957/5969/5979/5993/
+// 5999/6009/6025/6029, all "8th Ave Grandville") sharing one AppFolio
+// nickname, "Eaglebrook Apartments" — unlike every other property, the
+// Tenant Directory's Property column carries NO street number for it, so
+// resolveDirectoryPropertyKey_'s address-parse always fails and every
+// Eaglebrook unit silently matched zero directory rows (confirmed live —
+// a 2026-09-18 filing for unit 6029D shipped with only the primary tenant
+// named and both co-tenant emails blank, despite 2 Financially Responsible
+// tenants existing in the directory for that unit). Fix: Eaglebrook's own
+// Unit column already carries the building number the same way the
+// delinquency CSV's does (e.g. "6029D"), so match on that directly instead
+// of trying to parse an address out of the Property column.
+function isEaglebrookProperty_(propertyNickname) {
+  return propertyNickname.toLowerCase().indexOf('eaglebrook') >= 0;
+}
+
+function resolveEaglebrookDirectoryEntry_(entry, sheet2Map) {
+  var m = entry.unit.match(/^(\d{4})([A-Za-z]{1,2})$/i);
+  if (!m) return null;
+  var row = lookupByStreetNum_(m[1], sheet2Map);
+  if (!row) return null;
+  return { sheetKey: normalizeAddrKey_(row.addy), unit: m[2].toUpperCase() };
+}
+
 function lookupAllTenants_(sheetKey, unit, directory, sheet2Map, directoryKeyCache) {
   var unitNorm = normalizeUnitForMatch_(unit);
   return directory.filter(function(entry) {
     if (!entry.tenant) return false;
+    if (isEaglebrookProperty_(entry.property)) {
+      var resolved = resolveEaglebrookDirectoryEntry_(entry, sheet2Map);
+      if (!resolved) return false;
+      return resolved.sheetKey === sheetKey && normalizeUnitForMatch_(resolved.unit) === unitNorm;
+    }
     if (resolveDirectoryPropertyKey_(entry.property, sheet2Map, directoryKeyCache) !== sheetKey) return false;
     return normalizeUnitForMatch_(entry.unit) === unitNorm;
   });
