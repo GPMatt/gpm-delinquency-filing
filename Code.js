@@ -566,29 +566,6 @@ function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
   };
 }
 
-// All tenant types included (Responsible, Cosigner, Non-Responsible)
-// Tenant Directory "Property" values are AppFolio nicknames — either the full
-// address on its own (e.g. "11075 52nd Ave Allendale, MI 49401") or a friendly
-// label with the full address repeated after it (e.g. "The Oakwood - 547
-// Cherry St SE Grand Rapids, MI 49503", "Cardinal Point - 445 Knapp St NE
-// Grand Rapids, MI 49505"). Strip to the address portion (after the last
-// " - ", if present) and run it through the same normalizeAddrKey_ every
-// other address in this file resolves through — full street-number+name key,
-// not just the number, so unlike a house-number-only lookup this can't
-// collide with an unrelated property that happens to share a leading number.
-function resolveDirectoryPropertyKey_(propertyNickname, sheet2Map, cache) {
-  if (Object.prototype.hasOwnProperty.call(cache, propertyNickname)) return cache[propertyNickname];
-
-  var dashIdx  = propertyNickname.lastIndexOf(' - ');
-  var addrPart = dashIdx >= 0 ? propertyNickname.slice(dashIdx + 3) : propertyNickname;
-
-  var key = normalizeAddrKey_(addrPart);
-  if (key && !sheet2Map[key]) key = null; // parsed but no matching Sheet2 row — don't guess further
-
-  cache[propertyNickname] = key; // cache misses too (null) to avoid re-parsing
-  return key;
-}
-
 // "N/A" (single-unit properties in the Tenant Directory) should match the
 // decoded '' unit decodeUnit_ produces for single-unit Sheet2 rows.
 function normalizeUnitForMatch_(u) {
@@ -596,41 +573,57 @@ function normalizeUnitForMatch_(u) {
   return (s === 'n/a' || s === 'na') ? '' : s;
 }
 
-// Eaglebrook is ~9 separately-addressed buildings (5943/5957/5969/5979/5993/
-// 5999/6009/6025/6029, all "8th Ave Grandville") sharing one AppFolio
-// nickname, "Eaglebrook Apartments" — unlike every other property, the
-// Tenant Directory's Property column carries NO street number for it, so
-// resolveDirectoryPropertyKey_'s address-parse always fails and every
-// Eaglebrook unit silently matched zero directory rows (confirmed live —
-// a 2026-09-18 filing for unit 6029D shipped with only the primary tenant
-// named and both co-tenant emails blank, despite 2 Financially Responsible
-// tenants existing in the directory for that unit). Fix: Eaglebrook's own
-// Unit column already carries the building number the same way the
-// delinquency CSV's does (e.g. "6029D"), so match on that directly instead
-// of trying to parse an address out of the Property column.
-function isEaglebrookProperty_(propertyNickname) {
-  return propertyNickname.toLowerCase().indexOf('eaglebrook') >= 0;
-}
+// Resolves a Tenant Directory row to the same {sheetKey, unit} shape the
+// delinquency CSV resolves to, by running it through the exact same
+// resolveAddress_ parser — the one that already knows how to handle every
+// property shape that needs special-case logic (Wealthy/Sheldon's "W 5"/"S
+// 12" units, Cardinal Point's "NNN-NNN" units, Eaglebrook's "NNNN + letter"
+// building-coded units, IVA's "NNNN IVAnn" units, and any other embedded-
+// address unit) instead of only handling the standard "one Sheet2 row per
+// property" case and silently matching nothing for everything else.
+//
+// Confirmed broken in production before this fix: Eaglebrook, where the
+// Tenant Directory's Property column is "Eaglebrook Apartments - 5943 8th
+// Ave Grandville, MI 49418" for every one of its ~9 separately-addressed
+// buildings — a plain address-parse resolves that to Sheet2's "5943" row,
+// which doesn't exist (Sheet2 has 5957/5969/5979/5993/5999/6009/6025/6029,
+// not 5943), so every Eaglebrook unit matched zero directory rows. A live
+// 2026-09-18 filing for unit 6029D shipped with only the primary tenant
+// named and a blank e-service-email field, despite a second Financially
+// Responsible co-tenant (Jonah Aungst) on record. The same address-parse
+// mismatch applies to any other multi-building property under one AppFolio
+// nickname (Cardinal Point, IVA, Wealthy/Sheldon, and any future one) —
+// routing through resolveAddress_ fixes all of them the same way the
+// delinquency side already handles them, rather than special-casing each
+// one by name as it's discovered.
+//
+// Tenant Directory "Property" values are AppFolio nicknames — either the
+// full address on its own (e.g. "11075 52nd Ave Allendale, MI 49401") or a
+// friendly label with the full address repeated after it ("The Oakwood -
+// 547 Cherry St SE Grand Rapids, MI 49503", "Eaglebrook Apartments - 5943
+// 8th Ave Grandville, MI 49418") — strip to the address portion (after the
+// last " - ", if present) before handing off, since resolveAddress_ expects
+// a bare address like the delinquency CSV's own Address column.
+function resolveDirectoryEntry_(entry, sheet2Map, cache) {
+  var cacheKey = entry.property + '' + entry.unit;
+  if (Object.prototype.hasOwnProperty.call(cache, cacheKey)) return cache[cacheKey];
 
-function resolveEaglebrookDirectoryEntry_(entry, sheet2Map) {
-  var m = entry.unit.match(/^(\d{4})([A-Za-z]{1,2})$/i);
-  if (!m) return null;
-  var row = lookupByStreetNum_(m[1], sheet2Map);
-  if (!row) return null;
-  return { sheetKey: normalizeAddrKey_(row.addy), unit: m[2].toUpperCase() };
+  var dashIdx  = entry.property.lastIndexOf(' - ');
+  var addrPart = dashIdx >= 0 ? entry.property.slice(dashIdx + 3) : entry.property;
+
+  var result   = resolveAddress_(addrPart, entry.unit, sheet2Map);
+  var resolved = (result && !result.flag) ? { sheetKey: result.sheetKey, unit: result.unit } : null;
+
+  cache[cacheKey] = resolved; // cache misses too (null) to avoid re-parsing
+  return resolved;
 }
 
 function lookupAllTenants_(sheetKey, unit, directory, sheet2Map, directoryKeyCache) {
   var unitNorm = normalizeUnitForMatch_(unit);
   return directory.filter(function(entry) {
     if (!entry.tenant) return false;
-    if (isEaglebrookProperty_(entry.property)) {
-      var resolved = resolveEaglebrookDirectoryEntry_(entry, sheet2Map);
-      if (!resolved) return false;
-      return resolved.sheetKey === sheetKey && normalizeUnitForMatch_(resolved.unit) === unitNorm;
-    }
-    if (resolveDirectoryPropertyKey_(entry.property, sheet2Map, directoryKeyCache) !== sheetKey) return false;
-    return normalizeUnitForMatch_(entry.unit) === unitNorm;
+    var resolved = resolveDirectoryEntry_(entry, sheet2Map, directoryKeyCache);
+    return resolved && resolved.sheetKey === sheetKey && normalizeUnitForMatch_(resolved.unit) === unitNorm;
   });
 }
 
@@ -883,8 +876,9 @@ function filterRelevantDirectory_(directory, resolvedRows, sheet2Map, directoryK
     wanted[row.sheetKey + '|' + normalizeUnitForMatch_(row.unit)] = true;
   });
   return directory.filter(function(entry) {
-    var key = resolveDirectoryPropertyKey_(entry.property, sheet2Map, directoryKeyCache);
-    return wanted[key + '|' + normalizeUnitForMatch_(entry.unit)];
+    var resolved = resolveDirectoryEntry_(entry, sheet2Map, directoryKeyCache);
+    if (!resolved) return false;
+    return wanted[resolved.sheetKey + '|' + normalizeUnitForMatch_(resolved.unit)];
   });
 }
 
