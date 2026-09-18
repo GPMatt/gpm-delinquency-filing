@@ -533,7 +533,9 @@ function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
     })
     .map(function(t) { return formatName_(t.tenant); });
 
-  var tenantNames = [primaryFmt].concat(otherNames).join(', ');
+  // "and all other occupants" is standard boilerplate on this notice — covers
+  // anyone living there who isn't named as a financially responsible tenant.
+  var tenantNames = [primaryFmt].concat(otherNames).join(', ') + ' and all other occupants';
 
   var emails = allTenants
     .map(function(t) { return (t.email || '').trim(); })
