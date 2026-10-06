@@ -45,7 +45,7 @@ parseCsv(fs.readFileSync(sheetPath, 'utf8')).slice(1).forEach(r => {
 });
 
 // House number + first street word, tolerant of "5957B 8th Ave SW," style values.
-const truthKey = a => { const m = String(a).trim().match(/^(\d+)[A-Za-z]?\s+([A-Za-z0-9]+)/); return m ? m[1] + '|' + m[2].toLowerCase() : null; };
+const truthKey = a => { const m = String(a).trim().match(/^(?:[A-Za-z]-)?(\d+)[A-Za-z]?\s+([A-Za-z0-9]+)/); return m ? m[1] + '|' + m[2].toLowerCase() : null; };
 
 const units = parseCsv(fs.readFileSync(udPath, 'utf8').replace(/^﻿/, ''))
   .filter(r => r.length >= 3 && r[0] !== 'Unit Name' && (r[2] || '').trim());

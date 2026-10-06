@@ -14,6 +14,7 @@
 var PAST_FILING_DATES = [
   '2026-05-30', '2026-06-03', '2026-06-06', '2026-07-06', '2026-08-06', '2026-09-06',  // scheduled
   '2026-09-11', '2026-09-16', '2026-09-17', '2026-09-18', '2026-09-23',                // on-demand
+  '2026-10-06',                                                                        // scheduled
 ];
 
 // One AppFolio property, two households — the old lookup merged their tenants.
@@ -23,12 +24,21 @@ function auditPastFilings() {
   var sheet2Map = loadSheet2_();
   if (!sheet2Map) { Logger.log('Cannot load Sheet2'); return; }
   var sender  = cfg_('APPFOLIO_EMAIL_SENDER') || 'appfolio.com';
-  var threads = GmailApp.search('from:(' + sender + ') subject:"AF11 Delinquency"', 0, 10);
+  var query   = 'from:(' + sender + ') subject:"AF11 Delinquency"';
+  // If this is 0, the report emails are gone from the inbox (deleted or auto-purged).
+  Logger.log('AF11 Delinquency threads in mailbox (any date, incl. trash): ' + GmailApp.search('in:anywhere ' + query, 0, 500).length);
 
   var lines = [];
   PAST_FILING_DATES.forEach(function(ymd) {
-    var p    = ymd.split('-');
-    var text = extractFirstCSV_(threads, new Date(+p[0], +p[1] - 1, +p[2]));
+    // Search a 3-day window per filing day — a plain search only returns the
+    // newest threads, which never reaches back to older filing days.
+    var p       = ymd.split('-');
+    var day     = new Date(+p[0], +p[1] - 1, +p[2]);
+    var fmt     = function(d) { return Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy/MM/dd'); };
+    var threads = GmailApp.search('in:anywhere ' + query +
+                                  ' after:' + fmt(new Date(day.getTime() - 86400000)) +
+                                  ' before:' + fmt(new Date(day.getTime() + 2 * 86400000)), 0, 20);
+    var text    = extractFirstCSV_(threads, day);
     if (!text) { lines.push(ymd + ': no AF11 Delinquency email found for this day'); return; }
 
     var hits = [];

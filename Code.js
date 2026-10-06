@@ -171,8 +171,12 @@ function loadSheet2_() {
 }
 
 // "900 Leonard St NW Grand Rapids, MI 49504" → "900|leonard"
+// Also "O-680 Lake Michigan Dr NW" → "680|lake" (lettered grid address) and
+// "411-413 College Ave SE" → "411|college" (AppFolio property named as a range).
+// Without these the O-68x Sheet2 rows were never loaded and the College
+// duplex never matched, so both were flagged instead of filed.
 function normalizeAddrKey_(addr) {
-  var m = String(addr || '').trim().match(/^(\d+)\s+([A-Za-z0-9]+)/);
+  var m = String(addr || '').trim().match(/^(?:[A-Za-z]-)?(\d+)(?:-\d+)?\s+([A-Za-z0-9]+)/);
   return m ? (m[1] + '|' + m[2].toLowerCase()) : null;
 }
 
@@ -440,9 +444,11 @@ function resolveAddress_(rawAddr, rawUnit, sheet2Map) {
   // 717 5th Street NW, "1958" under 1956 Crestmoor Ct SE). Only when Sheet2 has
   // that number on the SAME street and the property's own row is a single home,
   // so a plain unit number in an apartment building can never be read as an address.
-  if (addrKey && /^\d+$/.test(unit)) {
+  // Also "O-682" under O-680 Lake Michigan Dr and "Unit 413" under 411-413 College.
+  var bareNumM = unit.match(/^(?:unit\s+)?(?:[A-Za-z]-)?(\d+)$/i);
+  if (addrKey && bareNumM) {
     var ownRow     = sheet2Map[addrKey];
-    var siblingRow = sheet2Map[unit + '|' + addrKey.split('|')[1]];
+    var siblingRow = sheet2Map[bareNumM[1] + '|' + addrKey.split('|')[1]];
     if (siblingRow && siblingRow !== ownRow && (!ownRow || ownRow.units <= 1)) {
       return makeResult_(parseFullAddress_(siblingRow.addy), '', siblingRow);
     }
@@ -1247,6 +1253,9 @@ function testAddressResolution() {
     ['Bare house-number unit',       '717 5th Street NW Grand Rapids, MI 49504',     '719',                  '719 5th', ''],
     ['Single home, no junk unit',    '3001 Woodcliff Ln SE Grand Rapids, MI 49546',  '3003 Woodcliff',       '3003 Woodcliff', ''],
     ['ADA tag is not the unit',      '730 Leonard St NW Grand Rapids, MI 49504',     '208 - ADA',            '730 Leonard', '208'],
+    ['Lettered grid address',        'O-680 Lake Michigan Dr NW Grand Rapids, MI 49534', 'O-684',            'O-684 Lake', ''],
+    ['Range-named property',         '411-413 College Ave SE Grand Rapids, MI 49503', 'Unit 413',            '413 College', ''],
+    ['Range-named, first address',   '411-413 College Ave SE Grand Rapids, MI 49503', 'Unit 411',            '411 College', ''],
   ];
 
   var passed = 0; var failed = 0;
