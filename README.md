@@ -51,3 +51,15 @@ parse correctly — no new infra, it reuses this script's own Gmail access
 and emails a pass/fail summary to `ADMIN_EMAIL` each day, then self-deletes.
 Run `checkInboxHealth()` directly any time to check right now instead of
 waiting for the next scheduled check.
+
+## Address audit
+
+One AppFolio property can cover several street addresses (28 and 30 Gold Ave SW, 16 and 18 Packard Ave SE).
+Before deploying any change to address resolution, or after adding properties, replay every unit through the resolver:
+
+```
+node test/audit_addresses.js <Delinquency Info tab as CSV> <AppFolio Unit Directory CSV>
+```
+
+The Unit Directory export needs the columns Unit Name, Unit Street Address 1, Property. The script exits 1 if any
+unit would be filed at the wrong street address or if two different units would be treated as one.

@@ -424,7 +424,31 @@ function resolveAddress_(rawAddr, rawUnit, sheet2Map) {
     return makeResult_(parseFullAddress_(row.addy), unitNum, row);
   }
 
-  // E. Address-prefixed unit — unit starts with a DIFFERENT 4-digit street number
+  // E. Unit name is itself a different Sheet2 address — one AppFolio property
+  // covering several street addresses ("30 Gold 02" and "18 Packard Ave SE"
+  // filed under 28 Gold Ave SW / 16 Packard Ave SE). Works for any house-number
+  // length, unlike rule G, which missed every 1-3 digit address and sent those
+  // notices to the property's own address with both households' tenants merged.
+  var addrKey = normalizeAddrKey_(addr);
+  var unitKey = normalizeAddrKey_(unit);
+  if (unitKey && unitKey !== addrKey && sheet2Map[unitKey]) {
+    var row = sheet2Map[unitKey];
+    return makeResult_(parseFullAddress_(row.addy), addressUnitSuffix_(unit), row);
+  }
+
+  // F. Same shape, but the unit is only the other house number ("719" under
+  // 717 5th Street NW, "1958" under 1956 Crestmoor Ct SE). Only when Sheet2 has
+  // that number on the SAME street and the property's own row is a single home,
+  // so a plain unit number in an apartment building can never be read as an address.
+  if (addrKey && /^\d+$/.test(unit)) {
+    var ownRow     = sheet2Map[addrKey];
+    var siblingRow = sheet2Map[unit + '|' + addrKey.split('|')[1]];
+    if (siblingRow && siblingRow !== ownRow && (!ownRow || ownRow.units <= 1)) {
+      return makeResult_(parseFullAddress_(siblingRow.addy), '', siblingRow);
+    }
+  }
+
+  // G. Address-prefixed unit — unit starts with a DIFFERENT 4-digit street number
   var unitNumM = unit.match(/^(\d{4,})\s+/);
   if (unitNumM) {
     var embeddedNum = unitNumM[1];
@@ -447,7 +471,7 @@ function resolveAddress_(rawAddr, rawUnit, sheet2Map) {
 function makeResult_(parsed, unit, row) {
   return {
     street:   parsed.street,
-    unit:     unit,
+    unit:     unit || parsed.unitHint || '',
     city:     parsed.city,
     state:    parsed.state,
     zip:      parsed.zip,
@@ -478,10 +502,27 @@ function lookupByStreetNum_(streetNum, sheet2Map) {
 function tryAddressPrefixedLookup_(embeddedNum, rawUnit, sheet2Map) {
   var row = lookupByStreetNum_(embeddedNum, sheet2Map);
   if (!row) return null;
-  var tokens    = rawUnit.trim().split(/\s+/);
-  var lastToken = tokens[tokens.length - 1];
-  var unitVal   = /^\d+$/.test(lastToken) ? String(parseInt(lastToken)) : lastToken;
-  return { row: row, unit: unitVal };
+  // Single-home row: whatever follows the number is street text, not a unit
+  // ("3003 Woodcliff" used to print as "Unit Woodcliff").
+  if (row.units <= 1) return { row: row, unit: '' };
+  var tokens = rawUnit.trim().split(/\s+/);
+  return { row: row, unit: unitToken_(tokens[tokens.length - 1]) };
+}
+
+// Unit part of an address-style unit name: "30 Gold 02" → "2",
+// "32 S Main St NE #5" → "5", "2715 McKee Ave SW 16" → "16". Returns '' when
+// the name is only an address ("18 Packard Ave SE", "2083 Shangrai La Dr SE").
+function addressUnitSuffix_(rawUnit) {
+  var tokens = rawUnit.trim().split(/\s+/);
+  if (tokens.length < 3) return '';
+  var last = tokens[tokens.length - 1];
+  return /^#?\d+[A-Za-z]?$/.test(last) ? unitToken_(last) : '';
+}
+
+// "#2" → "2", "02" → "2", "6L" → "6L"
+function unitToken_(token) {
+  var t = String(token).replace(/^#/, '');
+  return /^\d+$/.test(t) ? String(parseInt(t)) : t;
 }
 
 function decodeUnit_(row, rawUnit) {
@@ -490,7 +531,11 @@ function decodeUnit_(row, rawUnit) {
 }
 
 function extractUnitCore_(rawUnit) {
-  var u = rawUnit.trim();
+  // "208 - ADA" → "208" (the ADA tag used to become the unit)
+  var u = rawUnit.trim().replace(/\s*-?\s*ADA$/i, '').trim();
+
+  // Combined units ("126 &127") — keep whole rather than printing "&127"
+  if (u.indexOf('&') >= 0) return u;
 
   // Strip "Unit #?", "Apt.? #?" prefix
   var stripped = u.replace(/^(unit\s*#?|apt\.?\s*#?|apartment\s*#?)\s*/i, '').trim();
@@ -499,8 +544,7 @@ function extractUnitCore_(rawUnit) {
   // Multi-token starting with digit → last token is unit
   var tokens = u.split(/\s+/);
   if (tokens.length > 1 && /^\d/.test(tokens[0])) {
-    var last = tokens[tokens.length - 1];
-    return /^\d+$/.test(last) ? String(parseInt(last)) : last;
+    return unitToken_(tokens[tokens.length - 1]);
   }
 
   // Multi-token, last token is numeric
@@ -740,6 +784,16 @@ function sendPMEmails_(pmBlobs, flaggedRows, errors, missingLabels, date, meta) 
 // "1960 Burton St SE, Grand Rapids, MI 49506" → { street:"1960 Burton St SE", city:"Grand Rapids", ... }
 function parseFullAddress_(addr) {
   var s = String(addr).trim();
+  // Sheet2 address carrying its own unit: "411 Paris Ave SE Grand Rapids, MI 49503 (Unit 2)"
+  var unitHint = '';
+  var hintM = s.match(/^(.*?)\s*\((?:unit|apt)\.?\s*#?([^)]+)\)$/i);
+  if (hintM) { s = hintM[1].trim(); unitHint = hintM[2].trim(); }
+  var parsed = splitFullAddress_(s);
+  parsed.unitHint = unitHint;
+  return parsed;
+}
+
+function splitFullAddress_(s) {
   // Anchor on ", ST ZIPCODE" — this part is always unambiguous
   var m = s.match(/^(.*),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
   if (!m) return { street: s, city: '', state: 'MI', zip: '' };
@@ -747,10 +801,19 @@ function parseFullAddress_(addr) {
   // If there's a comma in the remainder, last comma cleanly splits street from city
   var lastComma = front.lastIndexOf(',');
   if (lastComma >= 0) {
-    return { street: front.slice(0, lastComma).trim(), city: front.slice(lastComma + 1).trim(), state: state, zip: zip };
+    var streetPart = front.slice(0, lastComma).trim();
+    var cityPart   = front.slice(lastComma + 1).trim();
+    // "7620 Fase St, SE Ada" — the quadrant belongs to the street, not the city
+    var quadM = cityPart.match(/^(NE|NW|SE|SW)\s+(.+)$/);
+    if (quadM) { streetPart += ' ' + quadM[1]; cityPart = quadM[2]; }
+    return { street: streetPart, city: cityPart, state: state, zip: zip };
   }
-  // No comma (e.g. "900 Leonard St NW Grand Rapids"): match against known portfolio cities
-  var CITIES = ['Grand Rapids', 'Grandville', 'Wyoming', 'Grand Haven', 'Holland', 'Kentwood', 'Walker', 'Comstock Park'];
+  // No comma (e.g. "900 Leonard St NW Grand Rapids"): match against known portfolio cities.
+  // Longer names first — "East Grand Rapids" must win over "Grand Rapids". Every
+  // multi-word city has to be listed, or the fallback keeps only its last word
+  // ("Cedar Springs" printed as street "... Cedar" / city "Springs").
+  var CITIES = ['East Grand Rapids', 'Cedar Springs', 'Comstock Park', 'Byron Center', 'Howard City',
+                'Grand Rapids', 'Grand Haven', 'Grandville', 'Wyoming', 'Holland', 'Kentwood', 'Walker'];
   for (var i = 0; i < CITIES.length; i++) {
     if (front.endsWith(' ' + CITIES[i])) {
       return { street: front.slice(0, front.length - CITIES[i].length - 1).trim(), city: CITIES[i], state: state, zip: zip };
@@ -1178,6 +1241,12 @@ function testAddressResolution() {
     ['Address-prefixed (McKee)',     '2700 Clyde Park Ave SW Wyoming, MI 49509',     '2715 McKee Ave SW 16', '2715 McKee', '16'],
     ['Address-same-num (Clyde Pk)',  '2700 Clyde Park Ave SW Wyoming, MI 49509',     '2700 Clyde Park Ave SW 25', '2700 Clyde', '25'],
     ['Zero-padded unit',             '258 Quimby St NE Grand Rapids, MI 49505',      '02',                   '258 Quimby', '2'],
+    ['Short-number address unit',    '28 Gold Ave SW Grand Rapids, MI 49504',        '30 Gold 02',           '30 Gold', '2'],
+    ['Same-property short number',   '28 Gold Ave SW Grand Rapids, MI 49504',        '28 Gold 03',           '28 Gold', '3'],
+    ['Address-only unit',            '16 Packard Ave SE Grand Rapids, MI 49503',     '18 Packard Ave SE',    '18 Packard', ''],
+    ['Bare house-number unit',       '717 5th Street NW Grand Rapids, MI 49504',     '719',                  '719 5th', ''],
+    ['Single home, no junk unit',    '3001 Woodcliff Ln SE Grand Rapids, MI 49546',  '3003 Woodcliff',       '3003 Woodcliff', ''],
+    ['ADA tag is not the unit',      '730 Leonard St NW Grand Rapids, MI 49504',     '208 - ADA',            '730 Leonard', '208'],
   ];
 
   var passed = 0; var failed = 0;
