@@ -109,26 +109,35 @@ function runFiling_(labels, skipVictory, opts) {
 
   var pmBlobs = {};
   var errors  = [];
+  var held    = [];
+  var notes   = [];
   var directoryKeyCache = {};
 
   delinquents.resolved.forEach(function(row) {
     try {
-      var formData = buildFormData_(row, directory, today, sheet2Map, directoryKeyCache);
-      var pdfB64   = callCloudFunction_(formData);
-      var blob     = makePDFBlob_(pdfB64, row, today);
+      var notice = prepareNotice_(row, directory, today, sheet2Map, directoryKeyCache);
+      recordNotes_(notes, row, notice);
+      if (notice.problems.length > 0) {
+        Logger.log('HELD ' + row.primaryName + ': ' + notice.problems.join('; '));
+        held.push(heldEntry_(row, notice));
+        return;
+      }
       Logger.log('✓ ' + row.primaryName + ' — ' + row.street +
                  (row.unit ? ', Unit ' + row.unit : '') + ' ($' + row.amount + ')');
       var pm = row.pm || 'UNKNOWN';
       if (!pmBlobs[pm]) pmBlobs[pm] = [];
-      pmBlobs[pm].push(blob);
+      pmBlobs[pm].push(notice.blob);
     } catch (e) {
       Logger.log('✗ ' + row.primaryName + ': ' + e.message);
       errors.push({ name: row.primaryName, reason: e.message });
     }
   });
 
-  Logger.log('Done. Filed: ' + (Object.keys(pmBlobs).reduce(function(s,k){return s+pmBlobs[k].length;},0)) + '  Errors: ' + errors.length);
-  sendPMEmails_(pmBlobs, delinquents.flagged, errors, attachments.missingLabels, today, opts.meta);
+  Logger.log('Done. Filed: ' + (Object.keys(pmBlobs).reduce(function(s,k){return s+pmBlobs[k].length;},0)) +
+             '  Held: ' + held.length + '  Errors: ' + errors.length);
+  var meta = opts.meta || {};
+  meta.held = held; meta.notes = notes;
+  sendPMEmails_(pmBlobs, delinquents.flagged, errors, attachments.missingLabels, today, meta);
 }
 
 
@@ -569,17 +578,33 @@ function extractUnitCore_(rawUnit) {
 // ============================================================
 // FORM DATA BUILDER
 // ============================================================
-function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
+// Everyone on the lease for this unit, in the order they are named on the
+// notice: Financially Responsible tenants first, then co-signers. Co-signers
+// are named and served exactly like tenants (changed 2026-10-07 — they used
+// to be left off).
+function noticeParties_(row, directory, sheet2Map, directoryKeyCache) {
   // row.unit (decoded, e.g. "5A") not row.rawUnit ("Unit 5A") — the Tenant Directory's
   // Unit column is already bare like the decoded form, not AppFolio's raw prefixed value.
-  // Co-signers are never named/served on the notice — only Financially Responsible occupants.
-  var allTenants = lookupAllTenants_(row.sheetKey, row.unit, directory, sheet2Map, directoryKeyCache)
-    .filter(function(t) { return normalizeForMatch_(t.tenantType) !== 'co-signer'; });
+  var all = lookupAllTenants_(row.sheetKey, row.unit, directory, sheet2Map, directoryKeyCache);
+  var isCosigner = function(t) { return normalizeForMatch_(t.tenantType) === 'co-signer'; };
+  return all.filter(function(t) { return !isCosigner(t); }).concat(all.filter(isCosigner));
+}
 
+// One directory cell can hold several addresses ("a@x.com; b@y.com").
+function splitEmails_(cell) {
+  return String(cell || '').split(/[\s,;]+/).filter(function(e) { return e; });
+}
+
+function buildFormData_(row, allTenants, date) {
   var primaryFmt = formatName_(row.primaryName);
+  var namedKeys  = [normalizeForMatch_(row.primaryName)];
   var otherNames = allTenants
     .filter(function(t) {
-      return normalizeForMatch_(t.tenant) !== normalizeForMatch_(row.primaryName);
+      // skip the primary, and anyone the directory lists twice
+      var key = normalizeForMatch_(t.tenant);
+      if (namedKeys.indexOf(key) >= 0) return false;
+      namedKeys.push(key);
+      return true;
     })
     .map(function(t) { return formatName_(t.tenant); });
 
@@ -588,9 +613,13 @@ function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
   // "I served this notice on Name" fields. Adding it here too double-prints it.
   var tenantNames = [primaryFmt].concat(otherNames).join(', ');
 
-  var emails = allTenants
-    .map(function(t) { return (t.email || '').trim(); })
-    .filter(function(e, i, arr) { return e && arr.indexOf(e) === i; }); // non-blank, deduped
+  var emails = [];
+  allTenants.forEach(function(t) {
+    splitEmails_(t.email).forEach(function(e) {
+      var seen = emails.some(function(x) { return x.toLowerCase() === e.toLowerCase(); });
+      if (!seen) emails.push(e);
+    });
+  });
 
   return {
     tenant_names:  tenantNames,
@@ -604,7 +633,7 @@ function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
     served_on:     tenantNames,
     // Fills the PDF's "electronic service address" field — checked in place of
     // first class mail (main.py's CHECKBOX_ON/OFF) since notices are now served
-    // electronically. Co-signers excluded above, so this matches tenant_names.
+    // electronically. Same people as tenant_names (co-signers included).
     electronic_service_email: emails.join(', '),
     // Fills the PDF's "Date" and "Date of Certificate Of Service" fields
     // (main.py's fill_form reads data.notice_date). Previously never sent
@@ -614,6 +643,76 @@ function buildFormData_(row, directory, date, sheet2Map, directoryKeyCache) {
     // timezone, so this stays correct even if that ever changes.
     notice_date:   Utilities.formatDate(date || new Date(), 'America/New_York', 'MM/dd/yyyy'),
   };
+}
+
+// ============================================================
+// PRE-SEND CHECKS
+// A notice with any "problem" is held back: it is not sent to the PM, and
+// the admin summary lists it with the reason. "notes" do not stop a notice;
+// they are things worth a second look. The Cloud Function adds its own
+// problems (text that will not fit on the form, a blank required field, a
+// court form whose fields have changed) — see callCloudFunction_.
+// ============================================================
+var EMAIL_RE = /^[^\s@,;]+@[^\s@,;]+\.[A-Za-z]{2,}$/;
+
+function checkNotice_(row, formData, allTenants) {
+  var problems = [];
+  var notes    = [];
+
+  if (allTenants.length === 0) {
+    problems.push('No one in the Tenant Directory matched this unit, so co-tenants, ' +
+                  'co-signers and email addresses could not be looked up');
+  } else {
+    var primaryListed = allTenants.some(function(t) {
+      return normalizeForMatch_(t.tenant) === normalizeForMatch_(row.primaryName);
+    });
+    if (!primaryListed) {
+      notes.push('"' + row.primaryName + '" is on the delinquency report but not in the Tenant ' +
+                 'Directory for this unit — confirm the others named belong to the same household');
+    }
+  }
+
+  var emails = formData.electronic_service_email ? formData.electronic_service_email.split(', ') : [];
+  if (emails.length === 0) {
+    problems.push('No email address on file for anyone named — the notice certifies electronic service');
+  }
+  emails.forEach(function(e) {
+    if (!EMAIL_RE.test(e)) problems.push('"' + e + '" is not a valid email address');
+  });
+
+  return { problems: problems, notes: notes };
+}
+
+// Builds one notice and runs every check on it. Returns
+// { formData, blob, problems, notes } — blob is null when the notice was
+// stopped before the form was filled.
+function prepareNotice_(row, directory, date, sheet2Map, directoryKeyCache) {
+  var parties  = noticeParties_(row, directory, sheet2Map, directoryKeyCache);
+  var formData = buildFormData_(row, parties, date);
+  var check    = checkNotice_(row, formData, parties);
+  var notice   = { formData: formData, blob: null, problems: check.problems, notes: check.notes };
+  if (notice.problems.length > 0) return notice;
+
+  var filled = callCloudFunction_(formData);
+  notice.blob     = makePDFBlob_(filled.pdfB64, row, date);
+  notice.problems = filled.problems;
+  return notice;
+}
+
+function heldEntry_(row, notice) {
+  if (notice.blob) notice.blob.setName('HELD_' + notice.blob.getName());
+  return {
+    name:    row.primaryName,
+    address: row.street + (row.unit ? ', Unit ' + row.unit : ''),
+    reasons: notice.problems,
+    blob:    notice.blob,
+  };
+}
+
+function recordNotes_(notes, row, notice) {
+  notice.notes.forEach(function(n) {
+    notes.push({ name: row.primaryName, address: row.street + (row.unit ? ', Unit ' + row.unit : ''), text: n });
+  });
 }
 
 // "N/A" (single-unit properties in the Tenant Directory) should match the
@@ -732,7 +831,9 @@ function sendPMEmails_(pmBlobs, flaggedRows, errors, missingLabels, date, meta) 
   if (!adminEmail) return;
 
   var totalSent = Object.keys(pmBlobs).reduce(function(sum, pm) { return sum + pmBlobs[pm].length; }, 0);
-  var hasIssues = errors.length > 0 || flaggedRows.length > 0 || missingLabels.length > 0;
+  var held      = meta.held  || [];
+  var notes     = meta.notes || [];
+  var hasIssues = errors.length > 0 || flaggedRows.length > 0 || missingLabels.length > 0 || held.length > 0;
 
   var summary = meta.manual
     ? 'Manual delinquency filing — initiated by ' + meta.initiator + ' — ' + dateStr + '\n\n'
@@ -754,6 +855,22 @@ function sendPMEmails_(pmBlobs, flaggedRows, errors, missingLabels, date, meta) 
     missingLabels.forEach(function(l) { summary += '  • ' + l + '\n'; });
   }
 
+  if (held.length > 0) {
+    summary += '\n⚠️ ' + held.length + ' notice(s) failed the pre-send check and were NOT sent to the PM:\n\n';
+    held.forEach(function(h) {
+      summary += '• ' + h.name + ' — ' + h.address + '\n';
+      h.reasons.forEach(function(r) { summary += '    ' + r + '\n'; });
+    });
+    summary += '\nFix the cause (usually the tenant record in AppFolio) and file again from the web app.';
+    if (held.some(function(h) { return h.blob; })) summary += ' The held form(s) are attached for reference only.';
+    summary += '\n';
+  }
+
+  if (notes.length > 0) {
+    summary += '\nSent, but worth a second look:\n';
+    notes.forEach(function(n) { summary += '  • ' + n.name + ' — ' + n.address + ': ' + n.text + '\n'; });
+  }
+
   if (errors.length > 0) {
     summary += '\n' + errors.length + ' PDF(s) failed to generate and were NOT sent:\n';
     errors.forEach(function(e) { summary += '  • ' + e.name + ': ' + e.reason + '\n'; });
@@ -772,12 +889,14 @@ function sendPMEmails_(pmBlobs, flaggedRows, errors, missingLabels, date, meta) 
   var subject = subjectPrefix + (hasIssues
     ? '⚠️ Delinquency Filed — ' + totalSent + ' sent' +
       (missingLabels.length > 0 ? ', ' + missingLabels.length + ' missing email(s)' : '') +
+      (held.length         > 0 ? ', ' + held.length + ' held'                      : '') +
       (errors.length       > 0 ? ', ' + errors.length + ' failed'                  : '') +
       (flaggedRows.length  > 0 ? ', ' + flaggedRows.length + ' unfiled'            : '') +
       ' — ' + dateStr
     : 'Delinquency Filed — ' + totalSent + ' notices sent — ' + dateStr);
 
-  GmailApp.sendEmail(adminEmail, subject, summary);
+  var heldBlobs = held.map(function(h) { return h.blob; }).filter(function(b) { return b; });
+  GmailApp.sendEmail(adminEmail, subject, summary, heldBlobs.length > 0 ? { attachments: heldBlobs } : {});
   Logger.log('Admin confirmation sent to: ' + adminEmail);
 }
 
@@ -851,6 +970,8 @@ function formatAmount_(amount) {
 // ============================================================
 // CLOUD FUNCTION
 // ============================================================
+// Returns { pdfB64, problems } — problems are the Cloud Function's own
+// reasons this notice must not go out (empty = passed).
 function callCloudFunction_(formData) {
   var url = cfg_('CLOUD_FUNCTION_URL');
   if (!url) throw new Error('CLOUD_FUNCTION_URL not set');
@@ -863,7 +984,12 @@ function callCloudFunction_(formData) {
     throw new Error('Cloud Function ' + resp.getResponseCode() + ': ' + resp.getContentText());
   var json = JSON.parse(resp.getContentText());
   if (!json.filledPdf) throw new Error('No filledPdf in response');
-  return json.filledPdf;
+  // An older Cloud Function returns no check results. Treat that as a failed
+  // check rather than sending a form nobody verified.
+  var problems = json.checks
+    ? (json.checks.problems || [])
+    : ['The form was filled but not verified (the Cloud Function is out of date)'];
+  return { pdfB64: json.filledPdf, problems: problems };
 }
 
 
@@ -995,10 +1121,19 @@ function webPreview(thresholdRaw, initiator) {
     token:         token,
     threshold:     threshold,
     rows: resolvedForPM.map(function(row) {
+      // Same lookup and checks the filing itself runs, minus filling the form,
+      // so the PM sees who will be named and what would be held before filing.
+      var parties  = noticeParties_(row, relevantDir, sheet2Map, directoryKeyCache);
+      var formData = buildFormData_(row, parties, new Date());
+      var check    = checkNotice_(row, formData, parties);
       return {
-        name:    row.primaryName,
-        address: row.street + (row.unit ? ', Unit ' + row.unit : '') + ', ' + row.city + ', ' + row.state + ' ' + row.zip,
-        amount:  row.amount,
+        name:     row.primaryName,
+        address:  row.street + (row.unit ? ', Unit ' + row.unit : '') + ', ' + row.city + ', ' + row.state + ' ' + row.zip,
+        amount:   row.amount,
+        named:    formData.tenant_names,
+        emails:   formData.electronic_service_email,
+        problems: check.problems,
+        notes:    check.notes,
       };
     }),
     flagged: delinquents.flagged.map(function(f) {
@@ -1025,21 +1160,23 @@ function webConfirmFiling(token, selectedIndices) {
   var today   = new Date();
   var pmBlobs = {};
   var errors  = [];
+  var held    = [];
+  var notes   = [];
   var sheet2Map = loadSheet2_();
   var directoryKeyCache = {};
 
   toFile.forEach(function(row) {
     try {
-      var formData = buildFormData_(row, data.directory, today, sheet2Map, directoryKeyCache);
-      var pdfB64   = callCloudFunction_(formData);
-      var blob     = makePDFBlob_(pdfB64, row, today);
+      var notice = prepareNotice_(row, data.directory, today, sheet2Map, directoryKeyCache);
+      recordNotes_(notes, row, notice);
+      if (notice.problems.length > 0) { held.push(heldEntry_(row, notice)); return; }
       // Route to whoever initiated this on-demand filing, not the row's Sheet2 PM —
       // for non-admins these are always the same person (webPreview filters to their
       // own rows); for ADMIN_INITIATORS this sends the notice to the admin instead of
       // silently emailing the property's actual PM.
       var pm = data.initiator;
       if (!pmBlobs[pm]) pmBlobs[pm] = [];
-      pmBlobs[pm].push(blob);
+      pmBlobs[pm].push(notice.blob);
     } catch (e) {
       errors.push({ name: row.primaryName, reason: e.message });
     }
@@ -1050,11 +1187,14 @@ function webConfirmFiling(token, selectedIndices) {
     initiator:   data.initiator,
     threshold:   data.threshold,
     deselected:  data.resolved.length - toFile.length,
+    held:        held,
+    notes:       notes,
   });
 
   return {
     filed:  Object.keys(pmBlobs).reduce(function(s, k) { return s + pmBlobs[k].length; }, 0),
     errors: errors.length,
+    held:   held.map(function(h) { return { name: h.name, address: h.address, reasons: h.reasons }; }),
   };
 }
 
@@ -1289,10 +1429,12 @@ function testSingleTenant() {
     landlord_name: '900 W Leonard LLC',
     amount:        '3,300.00',
     served_on:     'Yaser S. Kishawi',
+    electronic_service_email: 'a.long.test.address.for.fit@example-domain.com',
     notice_date:   Utilities.formatDate(new Date(), 'America/New_York', 'MM/dd/yyyy'),
   };
-  var pdfB64 = callCloudFunction_(formData);
-  var blob   = Utilities.newBlob(Utilities.base64Decode(pdfB64), 'application/pdf', 'TEST_Kishawi_Unit316.pdf');
+  var filled = callCloudFunction_(formData);
+  Logger.log(filled.problems.length ? 'Check FAILED: ' + filled.problems.join('; ') : 'Checks passed.');
+  var blob   = Utilities.newBlob(Utilities.base64Decode(filled.pdfB64), 'application/pdf', 'TEST_Kishawi_Unit316.pdf');
   var admin  = cfg_('ADMIN_EMAIL');
   if (!admin) { Logger.log('Set ADMIN_EMAIL to receive test PDF.'); return; }
   GmailApp.sendEmail(admin, 'TEST — Single Tenant PDF', 'Test PDF attached.', { attachments: [blob] });

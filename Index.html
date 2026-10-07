@@ -94,6 +94,9 @@
   th.check-col, td.check-col { width: 30px; text-align: center; padding: 8px 0; }
   .row-check, #selectAll { width: 17px; height: 17px; cursor: pointer; }
   tr.unchecked td { color: #756c5c; }
+  .sub { font-size: 12px; color: #6b5f4c; margin-top: 3px; overflow-wrap: anywhere; }
+  .sub.bad { color: var(--red); font-weight: 600; }
+  .sub.note { color: #7a4c12; }
   .summary-line { font-size: 14px; margin: 0 0 14px; color: #55493a; }
   .warn {
     background: #fbeee0;
@@ -173,7 +176,7 @@
 
   <div class="card" id="step3">
     <p class="summary-line">
-      Confirm the names, addresses, and amounts above are correct. This will
+      Confirm the names, email addresses, addresses, and amounts above are correct. This will
       generate and send official DC 100a demand notices to each PM.
     </p>
     <button class="btn-file" id="fileBtn" onclick="fileNow()">Let's File</button>
@@ -260,8 +263,16 @@
       fileBtn.disabled = true;
     } else {
       var rows = result.rows.map(function(r, i) {
-        return '<tr data-row="' + i + '"><td class="check-col"><input type="checkbox" class="row-check" data-idx="' + i + '" checked></td>' +
-               '<td>' + escapeHtml(r.name) + '</td><td>' + escapeHtml(r.address) + '</td><td class="amount">$' + escapeHtml(r.amount) + '</td></tr>';
+        // A row that fails the pre-send check can't be filed: unchecked and locked.
+        var blocked = r.problems && r.problems.length > 0;
+        var detail =
+          '<div class="sub">Notice names: ' + escapeHtml(r.named) + '</div>' +
+          '<div class="sub">E-service: ' + escapeHtml(r.emails || 'none') + '</div>' +
+          (r.problems || []).map(function(p) { return '<div class="sub bad">Can\'t file: ' + escapeHtml(p) + '</div>'; }).join('') +
+          (r.notes || []).map(function(n) { return '<div class="sub note">Check: ' + escapeHtml(n) + '</div>'; }).join('');
+        return '<tr data-row="' + i + '"' + (blocked ? ' class="unchecked"' : '') + '><td class="check-col"><input type="checkbox" class="row-check" data-idx="' + i + '"' +
+               (blocked ? ' disabled' : ' checked') + '></td>' +
+               '<td>' + escapeHtml(r.name) + detail + '</td><td>' + escapeHtml(r.address) + '</td><td class="amount">$' + escapeHtml(r.amount) + '</td></tr>';
       }).join('');
       tableWrap.innerHTML =
         '<table><thead><tr><th class="check-col"><input type="checkbox" id="selectAll" checked></th><th>Name</th><th>Address</th><th>Amount</th></tr></thead>' +
@@ -269,13 +280,14 @@
 
       document.getElementById('selectAll').addEventListener('change', function() {
         var checked = this.checked;
-        document.querySelectorAll('.row-check').forEach(function(cb) { cb.checked = checked; updateRowStyle_(cb); });
+        document.querySelectorAll('.row-check:not(:disabled)').forEach(function(cb) { cb.checked = checked; updateRowStyle_(cb); });
         updateSelectedSummary_();
       });
       document.querySelectorAll('.row-check').forEach(function(cb) {
         cb.addEventListener('change', function() { updateRowStyle_(cb); updateSelectAllState_(); updateSelectedSummary_(); });
       });
 
+      updateSelectAllState_();
       updateSelectedSummary_();
     }
 
@@ -288,18 +300,20 @@
   }
 
   function updateSelectAllState_() {
-    var boxes = document.querySelectorAll('.row-check');
+    var boxes = document.querySelectorAll('.row-check:not(:disabled)');
     var checkedCount = document.querySelectorAll('.row-check:checked').length;
     var selectAll = document.getElementById('selectAll');
-    if (selectAll) selectAll.checked = checkedCount === boxes.length;
+    if (selectAll) selectAll.checked = boxes.length > 0 && checkedCount === boxes.length;
   }
 
   function updateSelectedSummary_() {
     var total = document.querySelectorAll('.row-check').length;
     var checkedCount = document.querySelectorAll('.row-check:checked').length;
     var threshold = document.getElementById('thresholdInput').value;
+    var blocked = document.querySelectorAll('.row-check:disabled').length;
     document.getElementById('previewSummary').textContent =
-      checkedCount + ' of ' + total + ' notice(s) selected to file (met the $' + threshold + '+ threshold):';
+      checkedCount + ' of ' + total + ' notice(s) selected to file (met the $' + threshold + '+ threshold)' +
+      (blocked > 0 ? ' — ' + blocked + ' can\'t be filed until fixed, see the red lines' : '') + ':';
     document.getElementById('fileBtn').disabled = checkedCount === 0;
   }
 
@@ -320,10 +334,17 @@
 
     google.script.run
       .withSuccessHandler(function(result) {
+        var held = result.held || [];
         document.getElementById('fileResult').innerHTML =
           '<div class="success">✅ Filed ' + result.filed + ' notice(s).' +
           (result.errors > 0 ? ' ' + result.errors + ' failed — check the admin email for details.' : '') +
-          '</div>';
+          '</div>' +
+          (held.length > 0
+            ? '<div class="error" style="margin-top:12px">⚠️ ' + held.length + ' notice(s) failed the final form check and were <strong>not</strong> sent:' +
+              held.map(function(h) {
+                return '<div class="sub bad">' + escapeHtml(h.name) + ' — ' + escapeHtml(h.address) + ': ' + escapeHtml(h.reasons.join('; ')) + '</div>';
+              }).join('') + '</div>'
+            : '');
         btn.style.display = 'none';
         document.querySelector('#step3 .btn-secondary').textContent = 'Start a new filing';
       })

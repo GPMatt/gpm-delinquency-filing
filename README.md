@@ -52,6 +52,37 @@ and emails a pass/fail summary to `ADMIN_EMAIL` each day, then self-deletes.
 Run `checkInboxHealth()` directly any time to check right now instead of
 waiting for the next scheduled check.
 
+## Who is named, and the pre-send check
+
+Every notice names and serves everyone AppFolio lists on the lease for the
+unit: Financially Responsible tenants first, then co-signers. All of their
+email addresses go on the electronic-service line.
+
+Before a notice is sent to a PM it has to pass a check. A notice that fails
+is held: the PM does not get it, and the admin summary lists it with the
+reason (the held form is attached there for reference). A notice is held when:
+
+- nobody in the Tenant Directory matched the unit
+- there is no email address for anyone named, or an address is malformed
+- a required value is blank (name, address, owner, amount, date)
+- a value will not print in full on the form, or has a character the form
+  cannot print
+- the court form itself has changed (a field or checkbox is missing)
+- the filled PDF does not read back the way it was written
+
+The web app preview runs the first two checks up front and shows, per row,
+who will be named and which addresses will be served.
+
+The Cloud Function writes each text field at the largest size that fits
+(10pt down to 6pt) instead of leaving layout to the PDF viewer, which used
+to clip long values. Deploy the Cloud Function before pushing `Code.js`:
+`Code.js` holds every notice if the function does not return check results.
+
+Tests, run before deploying a change to either side:
+
+    node test/notice_checks.js
+    python3 test/form_checks.py
+
 ## Address audit
 
 One AppFolio property can cover several street addresses (28 and 30 Gold Ave SW, 16 and 18 Packard Ave SE).
