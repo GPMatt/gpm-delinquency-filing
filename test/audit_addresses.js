@@ -14,9 +14,6 @@
 // different units would be treated as the same one.
 const fs = require('fs'), vm = require('vm'), path = require('path');
 
-// Units where AppFolio's unit street address is itself wrong (confirmed by Matt).
-const KNOWN_APPFOLIO_TYPOS = { '2131': '2121 Leonard St NE is correct; unit street address says 2131' };
-
 const [sheetPath, udPath] = process.argv.slice(2);
 if (!sheetPath || !udPath) { console.error('usage: node test/audit_addresses.js <Sheet2.csv> <unit_directory.csv>'); process.exit(2); }
 
@@ -65,7 +62,7 @@ units.forEach(r => {
   (identity[id] = identity[id] || []).push(`${unit} (${street1})`);
   if (!res.city || !res.zip || /\b(Cedar|Howard|East|Byron|Comstock|Grand)$/.test(res.street)) badCity.push(`${unit} | street "${res.street}" city "${res.city}" zip "${res.zip}"`);
 
-  if (truthKey(street1) === gas.normalizeAddrKey_(res.street) || KNOWN_APPFOLIO_TYPOS[unit]) ok++;
+  if (truthKey(street1) === gas.normalizeAddrKey_(res.street)) ok++;
   else wrong.push(`${unit} | AppFolio: ${street1} | notice: ${res.street}${res.unit ? ', Unit ' + res.unit : ''} | ${prop}`);
 });
 const merged = Object.keys(identity).filter(k => identity[k].length > 1).map(k => `${k} <= ${identity[k].join(' ; ')}`);
