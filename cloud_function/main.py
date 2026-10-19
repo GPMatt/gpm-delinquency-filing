@@ -20,6 +20,8 @@ SIGNER_NAME           = "Matthieu Fournier"
 SIGNATURE_FONT_NAME   = "Signature"
 SIGNATURE_FONT_FILE   = os.path.join(os.path.dirname(__file__), "DancingScript.ttf")
 EXPECTED_SIGNATURES   = 3   # owner/agent line on each of the two copies + certificate of service
+# Off until Matt approves the drawn signature; the lines stay blank as before.
+DRAW_SIGNATURE        = False
 
 # Text-field fitting. The stock form leaves every text field without an
 # appearance stream, so each PDF viewer lays the text out itself at a fixed
@@ -425,7 +427,7 @@ def fill_form(data):
                         continue
                     field_obj[NameObject("/V")] = NameObject("/Off")
 
-    if signature_targets:
+    if DRAW_SIGNATURE and signature_targets:
         _draw_signature(writer, signature_targets)
 
     # If SCAO revises the form and renames a field, it would silently stay blank.
